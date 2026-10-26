@@ -3,6 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    // Set the theme before first paint to avoid a flash of the wrong scheme.
+    (function () {
+      try {
+        var t = localStorage.getItem("figfoundry.theme");
+        if (t !== "light" && t !== "dark") t = (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", t);
+        var a = localStorage.getItem("figfoundry.accent");
+        if (a) document.documentElement.setAttribute("data-accent", a);
+      } catch (e) {}
+    })();
+  </script>
   <title>Fig Foundry — Canvas</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/canvas.css">
@@ -27,6 +39,7 @@
         <button id="zoomIn" class="iconbtn" title="Zoom in" aria-label="Zoom in">+</button>
         <button id="zoomFit" class="textbtn">Fit</button>
       </div>
+      <button id="themeBtn" class="iconbtn" title="Theme (light / dark / system)" aria-label="Toggle theme">&#9790;</button>
       <button id="exportBtn" class="primary">Export code</button>
     </header>
 

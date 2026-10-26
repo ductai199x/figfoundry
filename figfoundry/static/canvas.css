@@ -3,14 +3,14 @@
    ========================================================================== */
 .fig-name { font-size: 15px; font-weight: 600; border: 1px solid transparent; border-radius: 7px;
             padding: 6px 10px; flex: 0 1 230px; min-width: 140px; background: transparent; color: var(--ink); outline: none; }
-.fig-name:hover { background: #f4f6f8; }
-.fig-name:focus { background: #fff; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+.fig-name:hover { background: var(--hover); }
+.fig-name:focus { background: var(--input-bg); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
 .side { flex-basis: 264px; border-right: 1px solid var(--line); background: var(--panel);
         display: flex; flex-direction: column; min-height: 0; }
 .signal-list { max-height: 200px; overflow-y: auto; border-bottom: 1px solid var(--line); }
 .signal { display: flex; align-items: center; gap: 9px; padding: 7px 14px; font-size: 12.5px;
           cursor: grab; user-select: none; color: var(--ink); }
-.signal:hover { background: #f4f6f8; }
+.signal:hover { background: var(--hover); }
 .signal:active { cursor: grabbing; }
 .signal .chip { width: 22px; height: 16px; border-radius: 4px; background: var(--accent-weak);
                 color: var(--accent-ink); font-size: 9.5px; font-weight: 700; display: flex;
@@ -27,9 +27,9 @@
 /* ---- plot rectangles ---- */
 .plotbox { position: absolute; box-sizing: border-box; outline: 1.5px solid transparent;
            transition: outline-color .08s; }
-.plotbox:hover { outline: 1.5px solid rgba(47, 102, 144, .5); }
+.plotbox:hover { outline: 1.5px solid color-mix(in srgb, var(--accent) 45%, transparent); }
 .plotbox.selected { outline: 2px solid var(--accent); }
-.plotbox .rh { position: absolute; width: 10px; height: 10px; background: #fff;
+.plotbox .rh { position: absolute; width: 10px; height: 10px; background: var(--panel);
                border: 1.5px solid var(--accent); border-radius: 2px; z-index: 3; display: none; }
 .plotbox.selected .rh { display: block; }
 .rh.nw { top: -6px; left: -6px; cursor: nwse-resize; }
@@ -43,7 +43,7 @@
 
 /* ---- movable artist overlays (titles, vlines, text, legends) ---- */
 .mov { position: absolute; box-sizing: border-box; outline: 1px solid transparent; cursor: grab; }
-.mov:hover { outline: 1px solid rgba(47, 102, 144, .55); }
+.mov:hover { outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); }
 .mov.selected { outline: 2px solid var(--accent); }
 .mov.inspect-only { cursor: default; }
 
@@ -59,7 +59,7 @@
          box-shadow: var(--shadow); transform: translate(-50%, -50%); }
 
 /* ---- overlay menu (drop a signal on an existing plot) ---- */
-.overlay-menu { position: fixed; z-index: 120; background: #fff; border: 1px solid var(--line);
+.overlay-menu { position: fixed; z-index: 120; background: var(--panel); border: 1px solid var(--line);
                 border-radius: 10px; box-shadow: var(--shadow); padding: 5px; min-width: 190px; }
 .om-item { display: block; width: 100%; text-align: left; background: none; border: none;
            font-size: 13px; color: var(--ink); padding: 8px 11px; border-radius: 7px; cursor: pointer; }
@@ -78,7 +78,7 @@
 
 /* ---- inspector: selects + number rows ---- */
 select.ctl-sel { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
-                 font-size: 13px; color: var(--ink); background: #fff; outline: none; cursor: pointer; }
+                 font-size: 13px; color: var(--ink); background: var(--input-bg); outline: none; cursor: pointer; }
 select.ctl-sel:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
 .num-row { display: flex; gap: 8px; align-items: center; }
 .num-row input { flex: 1; min-width: 0; }
@@ -87,7 +87,7 @@ select.ctl-sel:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--
 .art-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .art-item { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px;
             padding: 5px 9px; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
-.art-item:hover { background: #f4f6f8; }
+.art-item:hover { background: var(--hover); }
 .art-item .rm { color: var(--faint); cursor: pointer; padding: 0 4px; font-size: 14px; }
 .art-item .rm:hover { color: var(--danger); }
 .add-row { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -96,12 +96,12 @@ select.ctl-sel:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--
 .modal-fig .fig-label { font-size: 12px; font-weight: 600; color: var(--muted); }
 .modal-fig .fig-note { font-size: 11.5px; color: var(--faint); margin-left: 4px; }
 .view3d-card { max-width: 620px; }
-.view3d-stage { background: #fff; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+.view3d-stage { background: var(--artboard); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
                 margin-top: 12px; display: flex; justify-content: center; }
 .view3d-stage img { max-width: 100%; max-height: 340px; cursor: grab; touch-action: none; }
 .view3d-stage img:active { cursor: grabbing; }
 .view3d-ctl { display: flex; flex-direction: column; gap: 13px; margin-top: 14px; padding: 15px 16px;
-              background: #f7f8fa; border: 1px solid var(--line); border-radius: 10px; }
+              background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
 .v3-row { display: grid; grid-template-columns: 78px 1fr 46px; align-items: center; gap: 12px; }
 .v3-lab { font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .v3-range { width: 100%; cursor: pointer; }

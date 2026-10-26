@@ -21,6 +21,29 @@ async function api(path, opts) {
 const get = (p) => api(p);
 const post = (p, o) => api(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
 
+/* ---------------- theme (light / dark / system) ----------------
+   The figure artboard (--artboard) stays white in every theme; only the chrome
+   re-skins. "system" follows the OS and updates live. */
+function effectiveTheme() {
+  let t; try { t = localStorage.getItem("figfoundry.theme"); } catch (e) {}
+  if (t === "light" || t === "dark") return t;
+  return (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+}
+function applyTheme() {
+  const t = effectiveTheme();
+  document.documentElement.setAttribute("data-theme", t);
+  const btn = document.getElementById("themeBtn");
+  if (btn) { btn.textContent = t === "dark" ? "☀" : "☾"; btn.title = (t === "dark" ? "Light" : "Dark") + " theme (cycles light / dark / system)"; }
+}
+function cycleTheme() {
+  let cur; try { cur = localStorage.getItem("figfoundry.theme"); } catch (e) {}
+  const next = cur === "light" ? "dark" : cur === "dark" ? "system" : "light";
+  try { localStorage.setItem("figfoundry.theme", next); } catch (e) {}
+  applyTheme();
+}
+if (window.matchMedia) matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+applyTheme();
+
 /* ---------------- spec helpers ---------------- */
 const clone = (o) => JSON.parse(JSON.stringify(o));
 function getPath(o, path) { return path.reduce((a, k) => (a == null ? a : a[k]), o); }
@@ -1246,6 +1269,7 @@ function showLoadError(e) {
 }
 function wireChrome() {
   v3dWire();
+  $("#themeBtn").onclick = cycleTheme;
   $("#backBtn").onclick = () => { location.href = "/"; };
   $("#figName").addEventListener("change", async () => {
     state.name = $("#figName").value.trim() || "Untitled";
