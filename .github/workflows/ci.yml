@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install (project + dev)
+        run: uv sync --extra dev
+
+      - name: Lint (ruff)
+        run: uv run --with ruff ruff check figfoundry tests
+
+      - name: Test
+        run: uv run --extra dev pytest -q
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Validate artifacts
+        run: uv run --with twine twine check dist/*
