@@ -46,6 +46,11 @@
 .mov:hover { outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); }
 .mov.selected { outline: 2px solid var(--accent); }
 .mov.inspect-only { cursor: default; }
+/* rotation handle: a circle above the element (shows on hover / when selected) */
+.mov .rot-handle { display: none; position: absolute; top: -20px; left: 50%; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; box-shadow: var(--shadow-sm); cursor: grab; z-index: 6; }
+.mov .rot-handle::after { content: ""; position: absolute; top: 13px; left: 50%; width: 1.5px; height: 9px; background: var(--accent); transform: translateX(-50%); }
+.mov .rot-handle:active { cursor: grabbing; }
+.mov:hover .rot-handle, .mov.selected .rot-handle { display: block; }
 
 /* ---- snap guides ---- */
 .guides { position: absolute; inset: 0; pointer-events: none; z-index: 5; }

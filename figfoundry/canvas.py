@@ -73,22 +73,34 @@ def dataset_loader_code(filename):
     if filename.endswith(".npz"):
         return [
             "import numpy as np",
-            f"_ds = np.load({path!r}, allow_pickle=False)",
-            "data = {k: _ds[k] for k in _ds.files}",
+            f"DATA_DEFAULT = {path!r}",
+            "def _load_data(p):",
+            "    _ds = np.load(p, allow_pickle=False)",
+            "    return {k: _ds[k] for k in _ds.files}",
+            'if __name__ == "__main__":',
+            "    data = None  # loaded in the __main__ block below (via --data)",
+            "else:",
+            "    data = _load_data(DATA_DEFAULT)",
         ]
     if filename.endswith(".csv"):
         return [
             "import numpy as np, csv",
-            f"_f = open({path!r}, newline='', encoding='utf-8-sig'); _rows = [r for r in csv.reader(_f) if any(c.strip() for c in r)]; _f.close()",
-            "_data = {}",
-            "for _i, _c in enumerate(_rows[0] if _rows else []):",
-            "    _v = []",
-            "    for _r in _rows[1:]:",
-            "        if _i < len(_r):",
-            "            try: _v.append(float(_r[_i]))",
-            "            except ValueError: pass",
-            "    if _v: _data[_c.strip() or f'col{_i}'] = np.array(_v)",
-            "data = _data",
+            f"DATA_DEFAULT = {path!r}",
+            "def _load_data(p):",
+            "    _f = open(p, newline='', encoding='utf-8-sig'); _rows = [r for r in csv.reader(_f) if any(c.strip() for c in r)]; _f.close()",
+            "    _data = {}",
+            "    for _i, _c in enumerate(_rows[0] if _rows else []):",
+            "        _v = []",
+            "        for _r in _rows[1:]:",
+            "            if _i < len(_r):",
+            "                try: _v.append(float(_r[_i]))",
+            "                except ValueError: pass",
+            "        if _v: _data[_c.strip() or f'col{_i}'] = np.array(_v)",
+            "    return _data",
+            'if __name__ == "__main__":',
+            "    data = None  # loaded in the __main__ block below (via --data)",
+            "else:",
+            "    data = _load_data(DATA_DEFAULT)",
         ]
     # .pkl -- embedded whitelist unpickler (numpy + plain containers; blocks
     # os/subprocess/socket/ctypes and non-container builtins). The numpy
@@ -109,9 +121,15 @@ def dataset_loader_code(filename):
         '        raise pickle.UnpicklingError("blocked " + m + "." + n)',
         "def _safe_load(p):",
         '    with open(p, "rb") as f: return _SafeUnpickler(f).load()',
-        f"_obj = _safe_load({path!r})",
-        "_items = _obj.items() if isinstance(_obj, dict) else [('data', _obj)]",
-        "data = {str(k): np.asarray(v) for k, v in _items if np.asarray(v).dtype != object}",
+        f"DATA_DEFAULT = {path!r}",
+        "def _load_data(p):",
+        "    _obj = _safe_load(p)",
+        "    _items = _obj.items() if isinstance(_obj, dict) else [('data', _obj)]",
+        "    return {str(k): np.asarray(v) for k, v in _items if np.asarray(v).dtype != object}",
+        'if __name__ == "__main__":',
+        "    data = None  # loaded in the __main__ block below (via --data)",
+        "else:",
+        "    data = _load_data(DATA_DEFAULT)",
     ]
 
 
@@ -286,6 +304,9 @@ def codegen_canvas(spec, detail=True):
                     w = tt.get("weight", "normal")
                     w = w if w in ("normal", "bold", "light", "medium", "heavy", "semibold", "black") else "normal"
                     s.append(f'    ax.set_title({tt.get("text", "")!r}, x={_num(tt.get("x"), 0.0)!r}, y={_num(tt.get("y"), 1.0)!r}, pad={_num(tt.get("pad"), 1.0)!r}, fontsize={_num(tt.get("fontsize"), 11)!r}, fontweight={w!r}, color={tt.get("color", "#000000")!r})')
+                    _trot = _num(tt.get("rotation"), 0)
+                    if _trot:
+                        s.append(f"    ax.title.set_rotation({_trot!r})")
         except (KeyError, TypeError, ValueError, IndexError, AttributeError):
             # One malformed plot blanks itself out; it must not sink the whole render.
             pid = p.get("id", "?") if isinstance(p, dict) else "?"
@@ -306,7 +327,12 @@ def codegen_canvas(spec, detail=True):
     s.append('    ap = argparse.ArgumentParser(description=__doc__)')
     s.append('    ap.add_argument("--format", default="png", choices=["png", "svg", "pdf"])')
     s.append(f"    ap.add_argument(\"--dpi\", type=int, default={dpi})")
+    if ds:
+        s.append('    ap.add_argument("--data", default=DATA_DEFAULT, help="path to the dataset file (default is where this figure was made)")')
     s.append("    a = ap.parse_args()")
+    if ds:
+        s.append("    try: data = _load_data(a.data)")
+        s.append('    except FileNotFoundError as _e: raise SystemExit(f"dataset not found: {_e}; pass --data /path/to/your/dataset")')
     s.append('    fig = build(); fig.savefig(f"fig.{a.format}", dpi=a.dpi)')
     return "\n".join(s) + "\n"
 
@@ -508,7 +534,7 @@ def _codegen_artist(art):
         base = f'ax.text({float(art["x"])!r}, {float(art["y"])!r}, {art.get("text", "")!r}'
         if art.get("axes_frac"):
             base += ", transform=ax.transAxes"
-        base += f', ha={art.get("ha", "left")!r}, va={art.get("va", "bottom")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, color={art.get("color", "#000000")!r})'
+        base += f', ha={art.get("ha", "left")!r}, va={art.get("va", "bottom")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, color={art.get("color", "#000000")!r}, rotation={_num(art.get("rotation"), 0)!r})'
         return base
     if t == "legend":
         h = ", ".join(f'Line2D([], [], color={x.get("color", "#000")!r}, ls={x.get("ls", "-")!r}, lw={_num(x.get("lw"), 1.5)!r}, marker={x.get("marker", "")!r}, ms={_num(x.get("ms"), 0)!r})' for x in art.get("handles", []) if isinstance(x, dict))
@@ -517,7 +543,7 @@ def _codegen_artist(art):
         return (f'ax.annotate({art.get("text", "")!r}, xy=({float(art["xy"][0])!r}, {float(art["xy"][1])!r}), '
                 f'xytext=({float(art["xytext"][0])!r}, {float(art["xytext"][1])!r}), textcoords="axes fraction", '
                 f'arrowprops=dict(arrowstyle="->", color={art.get("color", "#000000")!r}, lw={_num(art.get("lw"), 1.2)!r}), '
-                f'color={art.get("color", "#000000")!r}, fontsize={_num(art.get("fontsize"), 10)!r})')
+                f'color={art.get("color", "#000000")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, rotation={_num(art.get("rotation"), 0)!r})')
     if t == "box":
         return (f'ax.add_patch(Rectangle(({float(art["x0"])!r}, {float(art["y0"])!r}), {float(art["w"])!r}, {float(art["h"])!r}, '
                 f'transform=ax.transAxes, fc={art.get("fc", "none")!r}, alpha={_num(art.get("alpha"), 0.15)!r}, '
@@ -547,7 +573,11 @@ def _codegen_figartist(fa):
     if t == "text":
         return f'fig.text({float(fa["x"])!r}, {float(fa["y"])!r}, {fa.get("text", "")!r}, ha={fa.get("ha", "left")!r}, va={fa.get("va", "bottom")!r}, fontsize={_num(fa.get("fontsize"), 12)!r}, color={fa.get("color", "#000000")!r}, rotation={_num(fa.get("rotation"), 0)!r})'
     if t == "suptitle":
-        return f'fig.suptitle({fa.get("text", "")!r}, x={_num(fa.get("x"), 0.5)!r}, y={_num(fa.get("y"), 1.0)!r}, fontsize={_num(fa.get("fontsize"), 14)!r}, color={fa.get("color", "#000000")!r})'
+        _srot = _num(fa.get("rotation"), 0)
+        _st = f'fig.suptitle({fa.get("text", "")!r}, x={_num(fa.get("x"), 0.5)!r}, y={_num(fa.get("y"), 1.0)!r}, fontsize={_num(fa.get("fontsize"), 14)!r}, color={fa.get("color", "#000000")!r})'
+        if _srot:
+            _st = "_st = " + _st + f"; _st.set_rotation({_srot!r})"
+        return _st
     return f"pass  # figure artist type {t!r} not emitted"
 
 

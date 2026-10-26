@@ -17,7 +17,7 @@
   /* text */
   --ink: #1c2026;
   --muted: #58616d;
-  --faint: #79828e;
+  --faint: #5d6673;
   /* lines */
   --line: #e6e8ec;
   --line-strong: #d3d8de;
@@ -285,6 +285,13 @@ input[type="text"] {
   transition: border-color .12s, box-shadow .12s;
 }
 input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+textarea.ctl-area {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13px; line-height: 1.35; color: var(--ink); background: var(--input-bg); outline: none;
+  font-family: inherit; resize: vertical; min-height: 42px;
+  transition: border-color .12s, box-shadow .12s;
+}
+textarea.ctl-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
 .color-row { display: flex; align-items: center; gap: 10px; }
 input[type="color"] {
   width: 38px; height: 30px; border: 1px solid var(--line); border-radius: 7px;

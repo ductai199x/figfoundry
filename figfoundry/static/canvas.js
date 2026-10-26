@@ -10,7 +10,7 @@ const $ = (s) => document.querySelector(s);
 const figImg = $("#figImg"), overlay = $("#overlay"), guides = $("#guides"), stage = $("#stage"), stageInner = $("#stageInner");
 const SNAP_PX = 8;
 
-const state = { slug: null, name: null, spec: null, render: null, signals: [], selected: null, selection: new Set(), zoom: 1, pan: { x: 0, y: 0 }, gridCols: 3, nudging: false, history: [], future: [], sliderSnapshot: null, signalSel: new Set() };
+const state = { slug: null, name: null, spec: null, render: null, signals: [], selected: null, selection: new Set(), zoom: 1, pan: { x: 0, y: 0 }, gridCols: 3, nudging: false, history: [], future: [], sliderSnapshot: null, signalSel: new Set(), clipboard: null };
 
 /* ---------------- api ---------------- */
 async function api(path, opts) {
@@ -115,7 +115,7 @@ function applyRender() {
       ? `<b style="color:var(--danger)">${oc} element${oc > 1 ? "s" : ""} off the canvas</b> &mdash; select it in Layers and drag it back, or enlarge the canvas`
       : "Drag a signal to add a plot &nbsp;&middot;&nbsp; Drag to move, handles to resize (snaps) &nbsp;&middot;&nbsp; Shift+click to multi-select &nbsp;&middot;&nbsp; Arrows to nudge (Shift = bigger) &nbsp;&middot;&nbsp; Drag empty space / space+drag to pan";
     const ae = document.activeElement;
-    const editing = ae && (ae.tagName === "INPUT" && ae.type === "text") || ae && ae.tagName === "SELECT";
+    const editing = ae && (ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || (ae.tagName === "INPUT" && /text|number|search|email|tel|url|password/.test(ae.type)));
     if (!editing) buildInspector();
   } catch (err) {
     console.error("applyRender:", err);
@@ -158,6 +158,32 @@ function drawGuides(gs) {
     guides.appendChild(el);
   }
 }
+// Unified snap model: every element's bbox in figure fractions. Plots come from the
+// spec (they have a rect); titles/labels/legends come from the server hotspots. This is
+// what lets guides work on text, not just plots.
+function snapModel(excludeId) {
+  const boxes = []; const r = state.render; if (!r) return boxes;
+  for (const p of state.spec.plots) boxes.push(p.rect.slice());
+  for (const h of r.hotspots) {
+    if (h.id === excludeId || h.id.startsWith("plot:")) continue;
+    boxes.push([h.x / r.img_w, 1 - (h.top + h.h) / r.img_h, h.w / r.img_w, h.h / r.img_h]);
+  }
+  return boxes;
+}
+// Position-only snap (unlike snapRect, it never changes a box's size, and it lets
+// labels sit slightly off-canvas). Mutates box[0]/box[1] and returns the guide lines.
+function snapBoxPos(box, others, imgW, imgH) {
+  const thrX = SNAP_PX / imgW, thrY = SNAP_PX / imgH;
+  const tx = [0, 0.25, 0.5, 0.75, 1], ty = [0, 0.25, 0.5, 0.75, 1];
+  for (const o of others) { tx.push(o[0], o[0] + o[2] / 2, o[0] + o[2]); ty.push(o[1], o[1] + o[3] / 2, o[1] + o[3]); }
+  const g = [];
+  const xE = [[v => box[0] = v, box[0]], [v => box[0] = v - box[2] / 2, box[0] + box[2] / 2], [v => box[0] = v - box[2], box[0] + box[2]]];
+  for (const [set, val] of xE) { for (const t of tx) { if (Math.abs(val - t) < thrX) { set(t); g.push({ axis: "v", f: t }); break; } } }
+  const yE = [[v => box[1] = v, box[1]], [v => box[1] = v - box[3] / 2, box[1] + box[3] / 2], [v => box[1] = v - box[3], box[1] + box[3]]];
+  for (const [set, val] of yE) { for (const t of ty) { if (Math.abs(val - t) < thrY) { set(t); g.push({ axis: "h", f: t }); break; } } }
+  box[0] = clamp(box[0], -0.2, 1.2); box[1] = clamp(box[1], -0.2, 1.2);
+  return g;
+}
 
 /* ---------------- overlays ---------------- */
 function buildOverlays() {
@@ -181,6 +207,7 @@ function buildOverlays() {
     div.style.left = (h.x / r.img_w * 100) + "%"; div.style.top = (h.top / r.img_h * 100) + "%";
     div.style.width = (h.w / r.img_w * 100) + "%"; div.style.height = (h.h / r.img_h * 100) + "%";
     makeMovable(div, h.id, "mov");
+    if (isCanvasMovable(h.id) && rotTarget(h.id)) addRotHandle(div, h.id);
     overlay.appendChild(div);
   }
   refreshSelection();
@@ -195,6 +222,38 @@ function isCanvasMovable(id) {
     return art && art.type === "text" && art.axes_frac;
   }
   return false;
+}
+// The spec field an element's rotation lives in (text-family only; matplotlib
+// cannot rotate a whole axes panel, so plots get no rotation).
+function rotTarget(id) {
+  if (id.startsWith("figartist:")) { const fa = state.spec.figure_artists[+id.slice(10)]; if (fa && ["text", "suptitle"].includes(fa.type)) return { get: () => fa.rotation ?? 0, set: (d) => { fa.rotation = d; } }; return null; }
+  if (id.startsWith("title:")) { const p = state.spec.plots.find((x) => x.id === id.slice(6)); if (p) return { get: () => p.title.rotation ?? 0, set: (d) => { p.title.rotation = d; } }; return null; }
+  if (id.startsWith("artist:")) { const [, pid, j] = id.split(":"); const p = state.spec.plots.find((x) => x.id === pid); const a = p && p.artists[+j]; if (a && ["text", "annotation"].includes(a.type)) return { get: () => a.rotation ?? 0, set: (d) => { a.rotation = d; } }; return null; }
+  return null;
+}
+// Wix/PowerPoint-style rotation handle: a circle above the element; drag around
+// its center to rotate (Shift snaps to 15°). The overlay box is rotated live as
+// a preview; the real rotation comes from the draft render.
+function addRotHandle(movDiv, id) {
+  const h = document.createElement("div"); h.className = "rot-handle"; h.title = "Drag to rotate (Shift snaps to 15°)";
+  h.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    h.setPointerCapture(e.pointerId);
+    const rect0 = movDiv.getBoundingClientRect();
+    const cx0 = rect0.left + rect0.width / 2, cy0 = rect0.top + rect0.height / 2;
+    const startAng = Math.atan2(e.clientY - cy0, e.clientX - cx0);
+    const tgt = rotTarget(id); const rot0 = tgt.get();
+    if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
+    const onMove = (ev) => {
+      let d = (Math.atan2(ev.clientY - cy0, ev.clientX - cx0) - startAng) * 180 / Math.PI;
+      if (ev.shiftKey) d = Math.round(d / 15) * 15;
+      let r = Math.round(rot0 + d); r = ((r % 360) + 360) % 360; if (r > 180) r -= 360;
+      tgt.set(r); movDiv.style.transform = `rotate(${r}deg)`; scheduleDraft();
+    };
+    const onUp = (ev) => { try { h.releasePointerCapture(ev.pointerId); } catch (_) {} document.removeEventListener("pointermove", onMove); document.removeEventListener("pointerup", onUp); movDiv.style.transform = ""; commitSnapshot(); commit(); };
+    document.addEventListener("pointermove", onMove); document.addEventListener("pointerup", onUp);
+  });
+  movDiv.appendChild(h);
 }
 
 function refreshSelection() {
@@ -212,7 +271,7 @@ function makeMovable(el, id, mode) {
     const shift = e.shiftKey;
     const handle = (e.target.dataset && e.target.dataset.h) || null;
     const startF = toFig(e.clientX, e.clientY);
-    let moved = false, onMove, onUp, sx = 0, sy = 0;
+    let moved = false, onMove, onUp, sx = 0, sy = 0, lastDxF = 0, lastDyF = 0;
     if (mode === "box") {
       const p = state.spec.plots.find((x) => x.id === id.slice(5));
       const rect0 = p.rect.slice();
@@ -224,6 +283,8 @@ function makeMovable(el, id, mode) {
       onMove = (ev) => {
         const F = toFig(ev.clientX, ev.clientY);
         const dxF = F.fx - startF.fx, dyBF = startF.fyTop - F.fyTop;
+        if (!moved && Math.abs(dxF) * r.img_w * state.zoom < 3 && Math.abs(dyBF) * r.img_h * state.zoom < 3) return;  // sub-3px = a click, not a drag
+        moved = true;
         if (handle === null) {
           const rect = rect0.slice(); rect[0] += dxF; rect[1] += dyBF;
           const guides = snapRect(rect, others, r.img_w, r.img_h);
@@ -244,14 +305,27 @@ function makeMovable(el, id, mode) {
           Object.assign(el.style, rectToCss(rect));
         }
         scheduleDraft();
-        moved = true;
       };
     } else {
       sx = e.clientX; sy = e.clientY;
+      const r0 = state.render;
+      const imgWpx = r0 ? r0.img_w * state.zoom : 1, imgHpx = r0 ? r0.img_h * state.zoom : 1;
+      const hs0 = r0 && r0.hotspots.find((h) => h.id === id);
+      const startBox = hs0 ? [hs0.x / r0.img_w, 1 - (hs0.top + hs0.h) / r0.img_h, hs0.w / r0.img_w, hs0.h / r0.img_h] : null;
+      const others = startBox ? snapModel(id) : [];
       onMove = (ev) => {
         const dx = ev.clientX - sx, dy = ev.clientY - sy;
+        if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;  // sub-3px = a click, not a drag
+        moved = true;
+        let dxF = dx / imgWpx, dyF = -dy / imgHpx;
+        if (startBox) {
+          const box = startBox.slice(); box[0] += dxF; box[1] += dyF;
+          drawGuides(snapBoxPos(box, others, r0.img_w, r0.img_h));
+          lastDxF = box[0] - startBox[0]; lastDyF = box[1] - startBox[1];  // the snapped delta
+        } else { lastDxF = dxF; lastDyF = dyF; }
         // el sits inside the zoomed stageInner, so its local px are screen px / zoom
-        if (dx || dy) { moved = true; el.style.transform = `translate(${dx / state.zoom}px,${dy / state.zoom}px)`; scheduleDraft(); }
+        el.style.transform = `translate(${lastDxF * imgWpx / state.zoom}px, ${-lastDyF * imgHpx / state.zoom}px)`;
+        scheduleDraft();
       };
     }
     onUp = (ev) => {
@@ -261,7 +335,7 @@ function makeMovable(el, id, mode) {
       drawGuides([]);
       el.style.transform = "";
       if (!moved) { select(id, shift); return; }
-      if (mode !== "box") commitArtDrag(id, ev.clientX - sx, ev.clientY - sy);
+      if (mode !== "box") commitArtDrag(id, lastDxF, lastDyF);
       commit();
     };
     document.addEventListener("pointermove", onMove);
@@ -270,11 +344,9 @@ function makeMovable(el, id, mode) {
   });
 }
 
-function commitArtDrag(id, dxPx, dyPx) {
-  // Apply the drag DELTA (in figure fractions) to the element's own coordinates, so the
-  // element lands exactly where the user dropped it (the grab offset is preserved).
-  const rect = figImg.getBoundingClientRect();
-  const dxF = dxPx / rect.width, dyF = -dyPx / rect.height;
+function commitArtDrag(id, dxF, dyF) {
+  // Apply the drag DELTA (in figure fractions, already snapped) to the element's own
+  // coordinates, so the element lands exactly where the user dropped it.
   const r = state.spec;
   if (id.startsWith("title:")) {
     const pid = id.slice(6); const p = r.plots.find((x) => x.id === pid);
@@ -318,6 +390,47 @@ async function commit() {
   try { await api(`/api/canvases/${state.slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: state.spec }) }); }
   catch (e) { toast("Save failed: " + e.message, true); }  // a failed save must not skip the full render
   await doRender(false);
+}
+
+/* ---------------- clipboard (copy / paste / cut / duplicate) ----------------
+   Copies top-level elements: plots (with their artists/lines) and figure_artists.
+   Signal refs are name-based, so a same-figure paste is always valid. */
+function copySelection() {
+  const ids = state.selection.size ? [...state.selection] : (state.selected ? [state.selected] : []);
+  if (!ids.length) return;
+  const plotIds = new Set(ids.filter((i) => i.startsWith("plot:")).map((i) => i.slice(5)));
+  const figIdxs = ids.filter((i) => i.startsWith("figartist:")).map((i) => +i.slice(10));
+  const plots = state.spec.plots.filter((p) => plotIds.has(p.id)).map((p) => clone(p));
+  const figs = figIdxs.map((j) => clone(state.spec.figure_artists[j]));
+  if (!plots.length && !figs.length) return;
+  state.clipboard = { plots, figs };
+  toast("Copied " + (plots.length + figs.length) + " element" + (plots.length + figs.length > 1 ? "s" : ""));
+}
+function pasteClipboard() {
+  const cb = state.clipboard; if (!cb || (!cb.plots.length && !cb.figs.length)) return;
+  pushHist();
+  for (const p of cb.plots) { const c = clone(p); c.id = nextPlotId(); c.rect = [r4(clamp(c.rect[0] + 0.05, 0, 1)), r4(clamp(c.rect[1] + 0.05, 0, 1)), c.rect[2], c.rect[3]]; state.spec.plots.push(c); }
+  for (const f of cb.figs) { const c = clone(f); if (c.loc) c.loc = [r4(c.loc[0] + 0.05), r4(c.loc[1] + 0.05)]; else { c.x = r4((c.x || 0) + 0.05); c.y = r4((c.y || 0) + 0.05); } state.spec.figure_artists.push(c); }
+  select(null); commit();
+}
+function deleteSelection() {
+  if (!state.selected && !state.selection.size) return;
+  pushHist();
+  const ids = state.selection.size ? [...state.selection] : [state.selected];
+  const plotIds = new Set(ids.filter((id) => id.startsWith("plot:")).map((id) => id.slice(5)));
+  if (plotIds.size) state.spec.plots = state.spec.plots.filter((p) => !plotIds.has(p.id));
+  const artDel = new Map(), lineDel = new Map(), figDel = [];
+  for (const id of ids) {
+    if (id.startsWith("artist:")) { const [, pid, j] = id.split(":"); if (!artDel.has(pid)) artDel.set(pid, []); artDel.get(pid).push(+j); }
+    else if (id.startsWith("line:")) { const [, pid, j] = id.split(":"); if (!lineDel.has(pid)) lineDel.set(pid, []); lineDel.get(pid).push(+j); }
+    else if (id.startsWith("figartist:")) figDel.push(+id.slice(10));
+    else if (id.startsWith("title:")) { const p = state.spec.plots.find((x) => x.id === id.slice(6)); if (p) p.title.visible = false; }
+  }
+  // splice high-to-low so deleting several items at once doesn't shift the other indices
+  for (const [pid, js] of artDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p) js.sort((a, b) => b - a).forEach((j) => p.artists.splice(j, 1)); }
+  for (const [pid, js] of lineDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p && p.extra_lines) js.sort((a, b) => b - a).forEach((j) => p.extra_lines.splice(j, 1)); }
+  figDel.sort((a, b) => b - a).forEach((j) => state.spec.figure_artists.splice(j, 1));
+  select(null); commit();
 }
 
 let nudgePushed = false, nudgeTimer = null;
@@ -520,6 +633,8 @@ function addPlotAt(fx, fyB, signal) {
   pushHist();
   const w = 0.3, h = 0.3;
   const rect = [r4(clamp(fx - w / 2, 0, 1 - w)), r4(clamp(fyB - h / 2, 0, 1 - h)), w, h];
+  const r = state.render || { img_w: 1000, img_h: 1000 };
+  snapRect(rect, state.spec.plots.map((p) => p.rect), r.img_w, r.img_h);  // snap the new plot on drop
   const p = plotForSignal(signal, rect);
   state.spec.plots.push(p);
   select("plot:" + p.id);
@@ -835,9 +950,9 @@ function buildPlotInspector(body, pid) {
   body.appendChild(ctlHead("Axes"));
   body.appendChild(ticksText("X ticks (blank = auto)", ["plots", idx(pid), "axes", "xticks"], p.axes.xticks));
   body.appendChild(ticksText("Y ticks (blank = auto)", ["plots", idx(pid), "axes", "yticks"], p.axes.yticks));
-  body.appendChild(text("X label", ["plots", idx(pid), "axes", "xlabel"], p.axes.xlabel));
+  body.appendChild(text("X label", ["plots", idx(pid), "axes", "xlabel"], p.axes.xlabel, true));
   body.appendChild(check("Show X label", ["plots", idx(pid), "axes", "xlabel_visible"], p.axes.xlabel_visible));
-  body.appendChild(text("Y label", ["plots", idx(pid), "axes", "ylabel"], p.axes.ylabel));
+  body.appendChild(text("Y label", ["plots", idx(pid), "axes", "ylabel"], p.axes.ylabel, true));
   body.appendChild(check("Show Y label", ["plots", idx(pid), "axes", "ylabel_visible"], p.axes.ylabel_visible));
   body.appendChild(hint("Labels and titles support LaTeX mathtext, e.g. <code>$x_0$</code>."));
   body.appendChild(num2("X range (blank = auto)", ["plots", idx(pid), "axes", "xlim"], p.axes.xlim));
@@ -855,7 +970,7 @@ function buildPlotInspector(body, pid) {
   body.appendChild(check("Show y tick labels", ["plots", idx(pid), "axes", "labelleft"], p.axes.labelleft));
   body.appendChild(ctlHead("Title"));
   body.appendChild(check("Show title", ["plots", idx(pid), "title", "visible"], p.title.visible));
-  body.appendChild(text("Title text", ["plots", idx(pid), "title", "text"], p.title.text));
+  body.appendChild(text("Title text", ["plots", idx(pid), "title", "text"], p.title.text, true));
   body.appendChild(slider("Title size", ["plots", idx(pid), "title", "fontsize"], p.title.fontsize, 6, 24, 0.5));
   body.appendChild(selControl("Title weight", ["plots", idx(pid), "title", "weight"], p.title.weight, [["normal", "Normal"], ["bold", "Bold"]]));
   body.appendChild(ctlHead("Artists"));
@@ -869,10 +984,11 @@ const idx = (pid) => state.spec.plots.findIndex((p) => p.id === pid);
 
 function buildTitleInspector(body, pid) {
   const t = state.spec.plots.find((x) => x.id === pid).title;
-  body.appendChild(text("Title text", ["plots", idx(pid), "title", "text"], t.text));
+  body.appendChild(text("Title text", ["plots", idx(pid), "title", "text"], t.text, true));
   body.appendChild(slider("X (of panel)", ["plots", idx(pid), "title", "x"], t.x, -0.6, 1.6, 0.02));
   body.appendChild(slider("Y (of panel)", ["plots", idx(pid), "title", "y"], t.y, -0.6, 1.6, 0.02));
   body.appendChild(slider("Size (pt)", ["plots", idx(pid), "title", "fontsize"], t.fontsize, 6, 24, 0.5));
+  body.appendChild(slider("Rotation (deg)", ["plots", idx(pid), "title", "rotation"], t.rotation ?? 0, -180, 180, 1));
   body.appendChild(selControl("Weight", ["plots", idx(pid), "title", "weight"], t.weight, [["normal", "Normal"], ["bold", "Bold"]]));
   body.appendChild(color("Color", ["plots", idx(pid), "title", "color"], t.color));
   body.appendChild(hint("Drag the title on the canvas to reposition it freely."));
@@ -881,14 +997,15 @@ function buildTitleInspector(body, pid) {
 function buildArtistInspector(body, pid, j) {
   const a = state.spec.plots.find((x) => x.id === pid).artists[j];
   const P = (k, v, mn, mx, st) => ["plots", idx(pid), "artists", j, k];
-  if (a.type === "vline") { body.appendChild(slider("X value", P("x", a.x), 0, 20, 0.5)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["dashdot", "Dash dot"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); body.appendChild(slider("Opacity", P("alpha"), a.alpha ?? 1, 0, 1, 0.05)); }
-  else if (a.type === "hline") { body.appendChild(slider("Y value", P("y", a.y), -1, 1, 0.05)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); }
-  else if (a.type === "text") { body.appendChild(text("Text", P("text"), a.text)); body.appendChild(slider("X", P("x"), a.x, -1, 2, 0.02)); body.appendChild(slider("Y", P("y"), a.y, -1, 2, 0.02)); body.appendChild(check("Use panel fraction", P("axes_frac"), !!a.axes_frac)); body.appendChild(slider("Size", P("fontsize"), a.fontsize ?? 10, 6, 24, 0.5)); body.appendChild(color("Color", P("color"), a.color || "#000")); }
+  if (a.type === "vline") { body.appendChild(slider("X value", P("x", a.x), 0, 20, 0.5, null, true)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["dashdot", "Dash dot"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); body.appendChild(slider("Opacity", P("alpha"), a.alpha ?? 1, 0, 1, 0.05)); }
+  else if (a.type === "hline") { body.appendChild(slider("Y value", P("y", a.y), -1, 1, 0.05, null, true)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); }
+  else if (a.type === "text") { body.appendChild(text("Text", P("text"), a.text, true)); body.appendChild(slider("X", P("x"), a.x, -1, 2, 0.02)); body.appendChild(slider("Y", P("y"), a.y, -1, 2, 0.02)); body.appendChild(check("Use panel fraction", P("axes_frac"), !!a.axes_frac)); body.appendChild(slider("Size", P("fontsize"), a.fontsize ?? 10, 6, 24, 0.5)); body.appendChild(slider("Rotation (deg)", P("rotation"), a.rotation ?? 0, -180, 180, 1)); body.appendChild(color("Color", P("color"), a.color || "#000")); }
   else if (a.type === "annotation") {
-    body.appendChild(text("Text", P("text"), a.text));
+    body.appendChild(text("Text", P("text"), a.text, true));
     body.appendChild(num2("Arrow points to (data x, y)", P("xy"), a.xy));
     body.appendChild(num2("Label at (panel x, y)", P("xytext"), a.xytext));
     body.appendChild(slider("Label size", P("fontsize"), a.fontsize ?? 10, 6, 20, 0.5));
+    body.appendChild(slider("Rotation (deg)", P("rotation"), a.rotation ?? 0, -180, 180, 1));
     body.appendChild(slider("Arrow width", P("lw"), a.lw ?? 1.2, 0.3, 4, 0.1));
     body.appendChild(color("Color", P("color"), a.color || "#000"));
   }
@@ -903,22 +1020,22 @@ function buildArtistInspector(body, pid, j) {
     body.appendChild(slider("Edge width", P("lw"), a.lw ?? 1, 0, 4, 0.1));
   }
   else if (a.type === "vspan") {
-    body.appendChild(slider("X start (data)", P("x0"), a.x0, 0, 20, 0.5));
-    body.appendChild(slider("X end (data)", P("x1"), a.x1, 0, 20, 0.5));
+    body.appendChild(slider("X start (data)", P("x0"), a.x0, 0, 20, 0.5, null, true));
+    body.appendChild(slider("X end (data)", P("x1"), a.x1, 0, 20, 0.5, null, true));
     body.appendChild(color("Color", P("color"), a.color || "#b03a2e"));
     body.appendChild(slider("Opacity", P("alpha"), a.alpha ?? 0.12, 0, 0.6, 0.01));
   }
   else if (a.type === "circle") {
-    body.appendChild(slider("Center X (data)", P("x"), a.x, -10, 20, 0.2));
-    body.appendChild(slider("Center Y (data)", P("y"), a.y, -10, 10, 0.2));
+    body.appendChild(slider("Center X (data)", P("x"), a.x, -10, 20, 0.2, null, true));
+    body.appendChild(slider("Center Y (data)", P("y"), a.y, -10, 10, 0.2, null, true));
     body.appendChild(slider("Radius", P("r"), a.r ?? 1, 0.05, 10, 0.1));
     body.appendChild(check("Filled", P("fill"), !!a.fill));
     body.appendChild(color("Color", P("color"), a.color || "#000"));
     body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1));
   }
   else if (a.type === "ellipse") {
-    body.appendChild(slider("Center X (data)", P("x"), a.x, -10, 20, 0.2));
-    body.appendChild(slider("Center Y (data)", P("y"), a.y, -10, 10, 0.2));
+    body.appendChild(slider("Center X (data)", P("x"), a.x, -10, 20, 0.2, null, true));
+    body.appendChild(slider("Center Y (data)", P("y"), a.y, -10, 10, 0.2, null, true));
     body.appendChild(slider("Width", P("w"), a.w ?? 2, 0.1, 10, 0.1));
     body.appendChild(slider("Height", P("h"), a.h ?? 1, 0.1, 10, 0.1));
     body.appendChild(slider("Angle (deg)", P("angle"), a.angle ?? 0, -180, 180, 5));
@@ -933,10 +1050,10 @@ function buildArtistInspector(body, pid, j) {
     body.appendChild(hint("Default 3-point triangle; edit points in the spec for custom shapes."));
   }
   else if (a.type === "arrow") {
-    body.appendChild(slider("From X", P("x0"), a.x0, -10, 20, 0.2));
-    body.appendChild(slider("From Y", P("y0"), a.y0, -10, 10, 0.2));
-    body.appendChild(slider("To X", P("x1"), a.x1, -10, 20, 0.2));
-    body.appendChild(slider("To Y", P("y1"), a.y1, -10, 10, 0.2));
+    body.appendChild(slider("From X", P("x0"), a.x0, -10, 20, 0.2, null, true));
+    body.appendChild(slider("From Y", P("y0"), a.y0, -10, 10, 0.2, null, true));
+    body.appendChild(slider("To X", P("x1"), a.x1, -10, 20, 0.2, null, true));
+    body.appendChild(slider("To Y", P("y1"), a.y1, -10, 10, 0.2, null, true));
     body.appendChild(color("Color", P("color"), a.color || "#000"));
     body.appendChild(slider("Width", P("lw"), a.lw ?? 1.5, 0.3, 4, 0.1));
   }
@@ -950,10 +1067,11 @@ function buildFigartistInspector(body, j) {
   const fa = state.spec.figure_artists[j];
   const P = (...k) => ["figure_artists", j, ...k];
   if (fa.type === "text") {
-    body.appendChild(text("Text", P("text"), fa.text));
+    body.appendChild(text("Text", P("text"), fa.text, true));
     body.appendChild(slider("X", P("x"), fa.x, 0, 1, 0.01));
     body.appendChild(slider("Y", P("y"), fa.y, 0, 1, 0.01));
     body.appendChild(slider("Size (pt)", P("fontsize"), fa.fontsize ?? 12, 6, 26, 0.5));
+    body.appendChild(slider("Rotation (deg)", P("rotation"), fa.rotation ?? 0, -180, 180, 1));
     body.appendChild(color("Color", P("color"), fa.color || "#000"));
   } else if (fa.type === "legend") {
     body.appendChild(slider("Size (pt)", P("fontsize"), fa.fontsize ?? 10, 6, 20, 0.5));
@@ -984,8 +1102,9 @@ function buildFigartistInspector(body, j) {
     addE.onclick = () => { pushHist(); fa.labels = fa.labels || []; fa.handles = fa.handles || []; fa.labels.push("entry"); fa.handles.push({ color: "#b03a2e", lw: 1.5 }); select("figartist:" + j); commit(); };
     body.appendChild(addE);
   } else if (fa.type === "suptitle") {
-    body.appendChild(text("Text", P("text"), fa.text));
+    body.appendChild(text("Text", P("text"), fa.text, true));
     body.appendChild(slider("Size (pt)", P("fontsize"), fa.fontsize ?? 14, 6, 26, 0.5));
+    body.appendChild(slider("Rotation (deg)", P("rotation"), fa.rotation ?? 0, -180, 180, 1));
     body.appendChild(color("Color", P("color"), fa.color || "#000"));
   }
   body.appendChild(ctlHead(""));
@@ -1060,7 +1179,7 @@ function buildArtistList(body, pid) {
 /* ---------------- control builders ---------------- */
 function ctlHead(t) { const h = document.createElement("div"); h.className = "section"; h.textContent = t; return h; }
 function hint(t) { const h = document.createElement("div"); h.className = "hint"; h.innerHTML = t; return h; }
-function slider(label, path, val, min, max, step, afterChange) {
+function slider(label, path, val, min, max, step, afterChange, noClamp) {
   const w = document.createElement("div"); w.className = "ctl";
   const head = document.createElement("div"); head.className = "ctl-head";
   const lab = document.createElement("label"); lab.textContent = label;
@@ -1085,7 +1204,9 @@ function slider(label, path, val, min, max, step, afterChange) {
   function commitVal() {
     const v = parseFloat(vv.value);
     if (isNaN(v)) { paint(); return; }               // not a number: keep the last good value
-    const cv = Math.max(min, Math.min(max, v));      // clamp to the slider's range
+    // Data-coordinate fields (noClamp) take the typed value as authoritative; the
+    // range only bounds coarse dragging. Everything else clamps to the slider range.
+    const cv = noClamp ? v : Math.max(min, Math.min(max, v));
     if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
     cur = cv; setPath(state.spec, path, cv); inp.value = cv; vv.value = fmt(cv, step);
     commitSnapshot(); if (afterChange) afterChange(); commit();
@@ -1097,29 +1218,43 @@ function slider(label, path, val, min, max, step, afterChange) {
   });
   w.appendChild(inp); return w;
 }
-function text(label, path, val) {
+// Esc in a half-edited text field reverts to the pre-edit snapshot (not a commit).
+function wireEscRevert(el) {
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.sliderSnapshot) {
+      e.preventDefault(); e.stopPropagation();
+      state.spec = state.sliderSnapshot; state.sliderSnapshot = null; updateHist(); commit();
+    }
+  });
+}
+function text(label, path, val, multiline) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
-  const inp = document.createElement("input"); inp.type = "text"; inp.value = val == null ? "" : val;
+  const inp = document.createElement(multiline ? "textarea" : "input");
+  if (multiline) { inp.rows = 2; inp.className = "ctl-area"; } else { inp.type = "text"; }
+  inp.value = val == null ? "" : val; inp.placeholder = "Text… (LaTeX like $x_0$ works)"; inp.spellcheck = false;
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); scheduleDraft(); });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(inp);
   w.appendChild(inp); return w;
 }
 function ticksText(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
-  const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : "";
+  const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : ""; inp.placeholder = "e.g. 0, 5, 10";
   const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(inp);
   w.appendChild(inp); return w;
 }
 function num2(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const row = document.createElement("div"); row.className = "num-row";
-  const a = document.createElement("input"), b = document.createElement("input"), sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "–"; a.type = b.type = "text";
+  const a = document.createElement("input"), b = document.createElement("input"), sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "–"; a.type = b.type = "text"; a.placeholder = "min"; b.placeholder = "max";
   a.value = val ? val[0] : ""; b.value = val ? val[1] : "";
   const parse = () => { const x = parseFloat(a.value), y = parseFloat(b.value); return (a.value && b.value && !isNaN(x) && !isNaN(y)) ? [x, y] : null; };
   a.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); }); b.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
   a.addEventListener("change", () => { commitSnapshot(); commit(); }); b.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(a); wireEscRevert(b);
   row.append(a, sep, b); w.appendChild(row); return w;
 }
 function color(label, path, val) {
@@ -1158,7 +1293,7 @@ function sigSelect(label, path, val, allowNone) {
   sel.addEventListener("change", () => { pushHist(); setPath(state.spec, path, sel.value || null); commit(); });
   w.appendChild(sel); return w;
 }
-function fmt(v, step) { if (v == null) return "(default)"; return step < 1 ? String(Math.round(v * 100) / 100) : String(Math.round(v)); }
+function fmt(v, step) { if (v == null) return "(default)"; const dp = step >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(step) + 1e-9)); return String(Number(v.toFixed(dp))); }
 
 /* ---------------- zoom ---------------- */
 function applyTransform() {
@@ -1277,7 +1412,7 @@ function v3dWire() {
 
 /* ---------------- toast ---------------- */
 let toastTimer;
-function toast(msg, isErr) { const t = $("#toast"); t.textContent = msg; t.style.background = isErr ? "var(--danger)" : "#1c2026"; t.classList.remove("hidden"); requestAnimationFrame(() => t.classList.add("show")); clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.classList.add("hidden"), 200); }, 2200); }
+function toast(msg, isErr) { const t = $("#toast"); t.textContent = msg; t.style.background = isErr ? "var(--danger)" : "var(--toast-bg)"; t.classList.remove("hidden"); requestAnimationFrame(() => t.classList.add("show")); clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.classList.add("hidden"), 200); }, isErr ? 4000 : 2200); }
 
 /* ---------------- boot ---------------- */
 async function boot() {
@@ -1311,6 +1446,11 @@ function showLoadError(e) {
 }
 function wireChrome() {
   v3dWire();
+  // The key handler accepts ⌘ on macOS (metaKey); make the visible labels match.
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const MOD = isMac ? "⌘" : "Ctrl";
+  $("#undoBtn").title = "Undo (" + MOD + "+Z)";
+  $("#redoBtn").title = "Redo (" + MOD + "Shift+Z)";
   $("#themeBtn").onclick = cycleTheme;
   $("#backBtn").onclick = () => { location.href = "/"; };
   $("#figName").addEventListener("change", async () => {
@@ -1362,30 +1502,24 @@ function wireChrome() {
     // Escape closes a modal first (works even when a slider inside it has focus)
     if (e.key === "Escape" && (exportOpen || v3dOpen)) { if (exportOpen) $("#exportModal").classList.add("hidden"); else $("#view3dModal").classList.add("hidden"); return; }
     const tgt = e.target;
-    if (tgt.isContentEditable || tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA") { if (tgt.tagName === "INPUT" && tgt.type === "text" && e.key === "Escape") tgt.blur(); return; }
+    // Only text-like fields own their keys (typing, native Ctrl+C, Esc-revert). A focused
+    // range/checkbox/color/select must still let modifier chords, Delete and Escape through
+    // to the global handlers (previously every INPUT swallowed Ctrl+Z).
+    const textLike = tgt.isContentEditable || tgt.tagName === "TEXTAREA" || (tgt.tagName === "INPUT" && /text|number|search|email|tel|url|password/.test(tgt.type));
+    if (textLike) return;
+    if ((tgt.tagName === "INPUT" || tgt.tagName === "SELECT") && !e.ctrlKey && !e.metaKey && !["Delete", "Backspace", "Escape"].includes(e.key)) return;  // plain keys (arrows) stay native on a focused control
     if (e.key === "Escape") { select(null); return; }
     if (exportOpen || v3dOpen) return;  // a modal is up: global shortcuts must not edit the figure behind it
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+    const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+    if (mod && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (mod && k === "y") { e.preventDefault(); redo(); }
+    else if (mod && k === "a") { e.preventDefault(); state.selection = new Set([...state.spec.plots.map((p) => "plot:" + p.id), ...state.spec.figure_artists.map((_, j) => "figartist:" + j)]); state.selected = state.selection.size ? [...state.selection].pop() : null; refreshSelection(); buildInspector(); }
+    else if (mod && k === "c") { e.preventDefault(); copySelection(); }
+    else if (mod && k === "v") { e.preventDefault(); pasteClipboard(); }
+    else if (mod && k === "x") { e.preventDefault(); copySelection(); deleteSelection(); }
+    else if (mod && k === "d") { e.preventDefault(); copySelection(); pasteClipboard(); }
     else if (e.key.startsWith("Arrow") && state.selected) { e.preventDefault(); const s = e.shiftKey ? 0.05 : 0.005; if (e.key === "ArrowLeft") nudgeSelected(-s, 0); else if (e.key === "ArrowRight") nudgeSelected(s, 0); else if (e.key === "ArrowUp") nudgeSelected(0, s); else if (e.key === "ArrowDown") nudgeSelected(0, -s); }
-    else if ((e.key === "Delete" || e.key === "Backspace") && state.selected) {
-      e.preventDefault(); pushHist();
-      const ids = state.selection.size ? [...state.selection] : [state.selected];
-      const plotIds = new Set(ids.filter((id) => id.startsWith("plot:")).map((id) => id.slice(5)));
-      if (plotIds.size) state.spec.plots = state.spec.plots.filter((p) => !plotIds.has(p.id));
-      const artDel = new Map(), lineDel = new Map(), figDel = [];
-      for (const id of ids) {
-        if (id.startsWith("artist:")) { const [, pid, j] = id.split(":"); if (!artDel.has(pid)) artDel.set(pid, []); artDel.get(pid).push(+j); }
-        else if (id.startsWith("line:")) { const [, pid, j] = id.split(":"); if (!lineDel.has(pid)) lineDel.set(pid, []); lineDel.get(pid).push(+j); }
-        else if (id.startsWith("figartist:")) figDel.push(+id.slice(10));
-        else if (id.startsWith("title:")) { const p = state.spec.plots.find((x) => x.id === id.slice(6)); if (p) p.title.visible = false; }
-      }
-      // splice high-to-low so deleting several items at once doesn't shift the other indices
-      for (const [pid, js] of artDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p) js.sort((a, b) => b - a).forEach((j) => p.artists.splice(j, 1)); }
-      for (const [pid, js] of lineDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p && p.extra_lines) js.sort((a, b) => b - a).forEach((j) => p.extra_lines.splice(j, 1)); }
-      figDel.sort((a, b) => b - a).forEach((j) => state.spec.figure_artists.splice(j, 1));
-      select(null); commit();
-    }
+    else if ((e.key === "Delete" || e.key === "Backspace") && (state.selected || state.selection.size)) { e.preventDefault(); deleteSelection(); }
   });
   // settle (full-quality render + save) the instant an arrow key is released
   document.addEventListener("keyup", (e) => {
