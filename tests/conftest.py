@@ -16,6 +16,15 @@ matplotlib.use("Agg")  # headless backend for all tests (conftest imports before
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_dataset_cache(monkeypatch):
+    """``canvas._ds_cache`` is keyed by filename only, so an entry left by one
+    test's tmp dir would serve that dir's arrays to the next test. Reset per test."""
+    import figfoundry.canvas as canvas
+
+    monkeypatch.setattr(canvas, "_ds_cache", {})
+
+
 @pytest.fixture
 def data_dir(tmp_path, monkeypatch):
     """Point the app at a temp data dir and create a small neutral dataset there."""

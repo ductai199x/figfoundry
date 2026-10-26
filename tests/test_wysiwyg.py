@@ -32,7 +32,9 @@ def test_blank_no_dataset(data_dir):
     assert spec["dataset"] is None
     code = canvas.codegen_canvas(spec)
     assert "data = {}" in code
-    assert canvas.build_figure(spec) is not None
+    fig = canvas.build_figure(spec)
+    assert not fig.axes  # nothing to draw, not just "some figure"
+    plt.close(fig)
 
 
 def test_preview_matches_export(data_dir, tmp_path):

@@ -185,6 +185,7 @@ function makeMovable(el, id, mode) {
   el.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
+    el.setPointerCapture(e.pointerId);  // pointerup is delivered even if released outside the window
     const shift = e.shiftKey;
     const handle = (e.target.dataset && e.target.dataset.h) || null;
     const startF = toFig(e.clientX, e.clientY);
@@ -226,12 +227,14 @@ function makeMovable(el, id, mode) {
       sx = e.clientX; sy = e.clientY;
       onMove = (ev) => {
         const dx = ev.clientX - sx, dy = ev.clientY - sy;
-        if (dx || dy) { moved = true; el.style.transform = `translate(${dx}px,${dy}px)`; scheduleDraft(); }
+        // el sits inside the zoomed stageInner, so its local px are screen px / zoom
+        if (dx || dy) { moved = true; el.style.transform = `translate(${dx / state.zoom}px,${dy / state.zoom}px)`; scheduleDraft(); }
       };
     }
     onUp = (ev) => {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
       drawGuides([]);
       el.style.transform = "";
       if (!moved) { select(id, shift); return; }
@@ -240,6 +243,7 @@ function makeMovable(el, id, mode) {
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
   });
 }
 
@@ -281,6 +285,9 @@ function select(id, additive) {
   buildInspector();
 }
 function pushHist() { state.history.push(clone(state.spec)); if (state.history.length > 60) state.history.shift(); state.future = []; updateHist(); }
+// Same as pushHist but for controls that snapshot on first `input` and commit on `change`
+// (sliders/text/num/color). Keeps the 60-entry cap, which the inline push used to skip.
+function commitSnapshot() { if (state.sliderSnapshot === null) return; state.history.push(state.sliderSnapshot); if (state.history.length > 60) state.history.shift(); state.future = []; state.sliderSnapshot = null; updateHist(); }
 function undo() { if (!state.history.length) return; state.future.push(clone(state.spec)); state.spec = state.history.pop(); state.sliderSnapshot = null; updateHist(); commit(); }
 function redo() { if (!state.future.length) return; state.history.push(clone(state.spec)); state.spec = state.future.pop(); state.sliderSnapshot = null; updateHist(); commit(); }
 function updateHist() { $("#undoBtn").disabled = !state.history.length; $("#redoBtn").disabled = !state.future.length; }
@@ -340,7 +347,7 @@ function plotForSignal(signal, rect) {
 }
 
 /* ---------------- Load data: pick an existing dataset or upload a new one ---------------- */
-function closeLoadMenu() { document.querySelectorAll(".load-menu").forEach((m) => m.remove()); }
+function closeLoadMenu() { document.querySelectorAll(".load-menu").forEach((m) => { if (m._outside) document.removeEventListener("pointerdown", m._outside); m.remove(); }); }
 async function loadDataMenu(x, y) {
   closeLoadMenu();
   const menu = document.createElement("div"); menu.className = "overlay-menu load-menu";
@@ -359,9 +366,13 @@ async function loadDataMenu(x, y) {
     b.innerHTML = `${d.name}<span class="k">${d.kind} · ${d.n_signals} signal${d.n_signals === 1 ? "" : "s"}</span>`;
     b.onclick = async (ev) => {
       ev.stopPropagation(); closeLoadMenu();
+      // fetch first, then mutate: a failed load must not leave spec.dataset pointing at a dataset
+      // whose signals are not loaded (the next render would KeyError on stale signal refs)
+      let sr;
+      try { sr = await get(`/api/datasets/${d.name}/signals`); }
+      catch (e) { toast("Could not load " + d.name + ": " + e.message, true); return; }
       pushHist();
       state.spec.dataset = d.name; state.dataset = d.name;
-      const sr = await get(`/api/datasets/${d.name}/signals`);
       state.signals = normalizeSignals(sr.signals);
       buildSignals();
       await commit();
@@ -374,16 +385,18 @@ async function loadDataMenu(x, y) {
   up.innerHTML = "Upload new file&hellip;<span class=\"k\">.npz / .pkl / .csv</span>";
   up.onclick = (ev) => { ev.stopPropagation(); closeLoadMenu(); uploadDataset(); };
   menu.appendChild(up);
-  setTimeout(() => document.addEventListener("pointerdown", function outside(ev) { if (!menu.contains(ev.target)) { closeLoadMenu(); document.removeEventListener("pointerdown", outside); } }), 0);
+  setTimeout(() => { const outside = (ev) => { if (!menu.contains(ev.target)) closeLoadMenu(); }; menu._outside = outside; document.addEventListener("pointerdown", outside); }, 0);
 }
 function uploadDataset() {
   const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".npz,.pkl,.pickle,.csv";
   inp.onchange = async () => {
     const f = inp.files[0]; if (!f) return;
-    const fd = new FormData(); fd.append("file", f);
-    const r = await fetch("/api/datasets", { method: "POST", body: fd });
-    const d = await r.json();
-    if (!r.ok) { toast("Upload failed: " + (d.detail || ""), true); return; }
+    let d;
+    try {
+      const r = await fetch("/api/datasets", { method: "POST", body: new FormData().append("file", f) });
+      d = await r.json();
+      if (!r.ok) { toast("Upload failed: " + (d.detail || ""), true); return; }
+    } catch (e) { toast("Upload failed: " + e.message, true); return; }
     pushHist();
     state.spec.dataset = d.name; state.dataset = d.name; state.signals = normalizeSignals(d.signals);
     buildSignals();
@@ -432,12 +445,13 @@ function addSelectedSignals() {
 }
 function startSignalDrag(e, s) {
   e.preventDefault();
+  e.currentTarget.setPointerCapture(e.pointerId);  // pointerup is delivered even if released outside the window
   const ghost = document.createElement("div"); ghost.className = "ghost"; ghost.textContent = s.label;
   document.body.appendChild(ghost);
   const mv = (ev) => { ghost.style.left = ev.clientX + "px"; ghost.style.top = ev.clientY + "px"; };
   mv(e);
   const up = (ev) => {
-    document.removeEventListener("pointermove", mv); ghost.remove();
+    document.removeEventListener("pointermove", mv); document.removeEventListener("pointercancel", cancel); ghost.remove();
     const r = figImg.getBoundingClientRect();
     if (ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) {
       const fx = (ev.clientX - r.left) / r.width, fyB = 1 - (ev.clientY - r.top) / r.height;
@@ -446,15 +460,18 @@ function startSignalDrag(e, s) {
       else addPlotAt(fx, fyB, s);
     }
   };
+  // a cancelled drag (touch interrupted) cleans up without dropping a plot
+  const cancel = () => { document.removeEventListener("pointermove", mv); document.removeEventListener("pointerup", up); document.removeEventListener("pointercancel", cancel); ghost.remove(); };
   document.addEventListener("pointermove", mv);
   document.addEventListener("pointerup", up, { once: true });
+  document.addEventListener("pointercancel", cancel, { once: true });
 }
 
 function plotAt(fx, fyB) {
   for (const p of state.spec.plots) { const [l, b, w, h] = p.rect; if (fx >= l && fx <= l + w && fyB >= b && fyB <= b + h) return p; }
   return null;
 }
-function closeOverlayMenu() { document.querySelectorAll(".overlay-menu").forEach((m) => m.remove()); }
+function closeOverlayMenu() { document.querySelectorAll(".overlay-menu").forEach((m) => { if (m._outside) document.removeEventListener("pointerdown", m._outside); m.remove(); }); }
 function showOverlayMenu(pid, clientX, clientY, signal) {
   closeOverlayMenu();
   const menu = document.createElement("div"); menu.className = "overlay-menu";
@@ -474,7 +491,7 @@ function showOverlayMenu(pid, clientX, clientY, signal) {
     menu.appendChild(b);
   }
   document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener("pointerdown", function outside(e) { if (!menu.contains(e.target)) { closeOverlayMenu(); document.removeEventListener("pointerdown", outside); } }), 0);
+  setTimeout(() => { const outside = (e) => { if (!menu.contains(e.target)) closeOverlayMenu(); }; menu._outside = outside; document.addEventListener("pointerdown", outside); }, 0);
 }
 function addPlotAt(fx, fyB, signal) {
   pushHist();
@@ -500,7 +517,7 @@ function buildLayers() {
   const list = $("#layersList"); list.innerHTML = "";
   state.spec.plots.forEach((p, i) => {
     const r = p.rect; const off = r[0] < -0.001 || r[1] < -0.001 || r[0] + r[2] > 1.001 || r[1] + r[3] > 1.001;
-    addLayer(list, { icon: "▣", swatch: p.style.color, name: (off ? "⚠ " : "") + `Plot ${i + 1} · ${sigLabel(p.data.y)}`, id: "plot:" + p.id });
+    addLayer(list, { icon: "▣", swatch: p.style.color, name: (off ? "⚠ " : "") + `Plot ${i + 1} · ${sigLabel(p.data.y || p.data.field || p.data.z)}`, id: "plot:" + p.id });
     if (p.title.visible) addLayer(list, { name: "Title", id: "title:" + p.id, sub: true });
     (p.extra_lines || []).forEach((el, j) => addLayer(list, { name: "line · " + sigLabel(el.ref), id: `line:${p.id}:${j}`, sub: true }));
     if (p.data.band) addLayer(list, { name: "band · " + sigLabel(p.data.band), id: "plot:" + p.id, sub: true });
@@ -699,8 +716,9 @@ function paletteBtn(pid) {
   b.onclick = async () => {
     const { palettes } = await get("/api/palettes");
     const pal = palettes["Okabe-Ito (colorblind-safe)"] || Object.values(palettes)[0];
-    pushHist();
     const p = state.spec.plots.find((x) => x.id === pid);
+    if (!p) return;
+    pushHist();
     p.style.color = pal[0];
     (p.extra_lines || []).forEach((el, i) => { el.color = pal[(i + 1) % pal.length]; });
     commit();
@@ -925,7 +943,7 @@ function buildFigartistInspector(body, j) {
       const row = document.createElement("div"); row.className = "num-row";
       const tin = document.createElement("input"); tin.type = "text"; tin.value = lb; tin.style.flex = "2";
       tin.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); fa.labels[i] = tin.value; scheduleDraft(); });
-      tin.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
+      tin.addEventListener("change", () => { commitSnapshot(); commit(); });
       const mk = document.createElement("select"); mk.className = "ctl-sel"; mk.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
       for (const [v, l] of [["", "— line"], ["o", "o dot"], ["^", "^ tri"], ["s", "s sq"], ["D", "D dia"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; mk.appendChild(o); }
       mk.value = (fa.handles[i] && fa.handles[i].marker) || "";
@@ -1026,14 +1044,14 @@ function slider(label, path, val, min, max, step, afterChange) {
   head.append(lab, vv); w.appendChild(head);
   const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = val;
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parseFloat(inp.value)); vv.textContent = fmt(parseFloat(inp.value), step); scheduleDraft(); });
-  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } if (afterChange) afterChange(); commit(); });
+  inp.addEventListener("change", () => { commitSnapshot(); if (afterChange) afterChange(); commit(); });
   w.appendChild(inp); return w;
 }
 function text(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const inp = document.createElement("input"); inp.type = "text"; inp.value = val == null ? "" : val;
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); scheduleDraft(); });
-  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
+  inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   w.appendChild(inp); return w;
 }
 function ticksText(label, path, val) {
@@ -1041,7 +1059,7 @@ function ticksText(label, path, val) {
   const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : "";
   const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
-  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
+  inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   w.appendChild(inp); return w;
 }
 function num2(label, path, val) {
@@ -1051,7 +1069,7 @@ function num2(label, path, val) {
   a.value = val ? val[0] : ""; b.value = val ? val[1] : "";
   const parse = () => { const x = parseFloat(a.value), y = parseFloat(b.value); return (a.value && b.value && !isNaN(x) && !isNaN(y)) ? [x, y] : null; };
   a.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); }); b.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
-  a.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); }); b.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
+  a.addEventListener("change", () => { commitSnapshot(); commit(); }); b.addEventListener("change", () => { commitSnapshot(); commit(); });
   row.append(a, sep, b); w.appendChild(row); return w;
 }
 function color(label, path, val) {
@@ -1060,7 +1078,7 @@ function color(label, path, val) {
   const inp = document.createElement("input"); inp.type = "color"; inp.value = val || "#000000";
   const hex = document.createElement("span"); hex.className = "color-hex"; hex.textContent = val || "#000000";
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); hex.textContent = inp.value; scheduleDraft(); });
-  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
+  inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   row.append(inp, hex); w.appendChild(row); return w;
 }
 function check(label, path, val) {
@@ -1165,7 +1183,7 @@ function v3dRender() {
   fetch(`/api/canvases/${state.slug}/render`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: v3d.spec, draft: true }) })
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => { if (d) $("#view3dImg").src = `data:${d.mime};base64,${d.img}`; v3dBusy = false; if (v3dAgain) { v3dAgain = false; v3dRender(); } })
-    .catch(() => { v3dBusy = false; });
+    .catch(() => { v3dBusy = false; v3dAgain = false; });  // a failed render drops the pending re-render
 }
 function v3dSync() { $("#v3e").value = v3d.elev; $("#v3a").value = v3d.azim; $("#v3d").value = v3d.dist; v3dVals(); v3dRender(); }
 function v3dWire() {
@@ -1263,19 +1281,26 @@ function wireChrome() {
     const empty = e.target === stage || e.target === stageInner || e.target === figImg || e.target === overlay;
     if (e.button === 1 || (e.button === 0 && (empty || spaceDown))) {
       e.preventDefault();
+      stage.setPointerCapture(e.pointerId);  // pointerup is delivered even if released outside the window
       pan = { x: e.clientX, y: e.clientY, px: state.pan.x, py: state.pan.y, clickEmpty: e.button === 0 && empty && !spaceDown };
     }
   });
   window.addEventListener("pointermove", (e) => { if (!pan) return; state.pan.x = pan.px + (e.clientX - pan.x); state.pan.y = pan.py + (e.clientY - pan.y); applyTransform(); });
   window.addEventListener("pointerup", (e) => { if (pan && pan.clickEmpty && Math.abs(e.clientX - pan.x) < 3 && Math.abs(e.clientY - pan.y) < 3) select(null); pan = null; });
+  window.addEventListener("pointercancel", () => { pan = null; });
   window.addEventListener("keydown", (e) => { if (e.code === "Space" && !/INPUT|SELECT|TEXTAREA/.test(e.target.tagName || "")) { spaceDown = true; stage.style.cursor = "grab"; } });
   window.addEventListener("keyup", (e) => { if (e.code === "Space") { spaceDown = false; stage.style.cursor = ""; } });
   document.addEventListener("keydown", (e) => {
+    const exportOpen = !$("#exportModal").classList.contains("hidden");
+    const v3dOpen = !$("#view3dModal").classList.contains("hidden");
+    // Escape closes a modal first (works even when a slider inside it has focus)
+    if (e.key === "Escape" && (exportOpen || v3dOpen)) { if (exportOpen) $("#exportModal").classList.add("hidden"); else $("#view3dModal").classList.add("hidden"); return; }
     const tgt = e.target;
     if (tgt.isContentEditable || tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA") { if (tgt.tagName === "INPUT" && tgt.type === "text" && e.key === "Escape") tgt.blur(); return; }
+    if (e.key === "Escape") { select(null); return; }
+    if (exportOpen || v3dOpen) return;  // a modal is up: global shortcuts must not edit the figure behind it
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
-    else if (e.key === "Escape") { if (!$("#exportModal").classList.contains("hidden")) $("#exportModal").classList.add("hidden"); else select(null); }
     else if (e.key.startsWith("Arrow") && state.selected) { e.preventDefault(); const s = e.shiftKey ? 0.05 : 0.005; if (e.key === "ArrowLeft") nudgeSelected(-s, 0); else if (e.key === "ArrowRight") nudgeSelected(s, 0); else if (e.key === "ArrowUp") nudgeSelected(0, s); else if (e.key === "ArrowDown") nudgeSelected(0, -s); }
     else if ((e.key === "Delete" || e.key === "Backspace") && state.selected) {
       e.preventDefault(); pushHist();

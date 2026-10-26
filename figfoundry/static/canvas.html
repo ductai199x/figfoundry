@@ -10,21 +10,21 @@
 <body>
   <div id="editor" class="editor">
     <header class="topbar">
-      <button id="backBtn" class="iconbtn" title="Back to figures">&#8592;</button>
+      <button id="backBtn" class="iconbtn" title="Back to figures" aria-label="Back to figures">&#8592;</button>
       <input id="figName" class="fig-name" value="Untitled" spellcheck="false" aria-label="Figure name" title="Rename this figure (saves on blur)">
-      <button id="duplicateBtn" class="iconbtn" title="Duplicate this figure">&#10697;</button>
-      <button id="deleteBtn" class="iconbtn" title="Delete this figure">&#128465;</button>
+      <button id="duplicateBtn" class="iconbtn" title="Duplicate this figure" aria-label="Duplicate this figure">&#10697;</button>
+      <button id="deleteBtn" class="iconbtn" title="Delete this figure" aria-label="Delete this figure">&#128465;</button>
       <div class="topbar-spacer"></div>
       <div class="hist">
-        <button id="undoBtn" class="iconbtn" title="Undo (Ctrl+Z)">&#8630;</button>
-        <button id="redoBtn" class="iconbtn" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+        <button id="undoBtn" class="iconbtn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>&#8630;</button>
+        <button id="redoBtn" class="iconbtn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>&#8631;</button>
       </div>
       <button id="addPlotBtn" class="textbtn" title="Add an empty plot">+ Plot</button>
       <button id="loadDataBtn" class="textbtn" title="Load a .npz / .pkl dataset">Load data&hellip;</button>
       <div class="zoomctl">
-        <button id="zoomOut" class="iconbtn" title="Zoom out">&minus;</button>
+        <button id="zoomOut" class="iconbtn" title="Zoom out" aria-label="Zoom out">&minus;</button>
         <span id="zoomLabel" class="zoom-label">100%</span>
-        <button id="zoomIn" class="iconbtn" title="Zoom in">+</button>
+        <button id="zoomIn" class="iconbtn" title="Zoom in" aria-label="Zoom in">+</button>
         <button id="zoomFit" class="textbtn">Fit</button>
       </div>
       <button id="exportBtn" class="primary">Export code</button>
@@ -63,7 +63,7 @@
     <div class="modal-card">
       <div class="modal-head">
         <h2 id="exportModalTitle">Generated code</h2>
-        <button id="modalClose" class="iconbtn" title="Close">&#10005;</button>
+        <button id="modalClose" class="iconbtn" title="Close" aria-label="Close">&#10005;</button>
       </div>
       <p class="modal-sub">Reproduces the figure exactly. References the canvas dataset file.</p>
       <pre class="code"><code id="codeBody"></code></pre>
@@ -88,7 +88,7 @@
     <div class="modal-card view3d-card">
       <div class="modal-head">
         <h2 id="view3dTitle">3-D view</h2>
-        <button id="view3dClose" class="iconbtn" title="Close">&#10005;</button>
+        <button id="view3dClose" class="iconbtn" title="Close" aria-label="Close">&#10005;</button>
       </div>
       <p class="modal-sub">Drag the preview to rotate, scroll to zoom. Adjust, then accept to apply it to the figure.</p>
       <div class="view3d-stage">

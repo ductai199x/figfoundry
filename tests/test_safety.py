@@ -8,12 +8,21 @@ import pytest
 from figfoundry.data_io import SafeUnpickler
 
 
-def test_blocks_code_execution():
-    evil = io.BytesIO()
-    pickle.dump({"a": 1, "evil": __import__("os").system}, evil)
-    evil.seek(0)
+@pytest.mark.parametrize("evil", [
+    __import__("os").system,
+    __import__("subprocess").run,
+    __import__,          # builtins.__import__
+    eval,                # builtins.eval
+    exec,                # builtins.exec
+    open,                # builtins.open (file read)
+])
+def test_blocks_code_execution(evil):
+    """Any code-execution primitive smuggled in as a pickle value is rejected."""
+    evil_buf = io.BytesIO()
+    pickle.dump({"a": 1, "evil": evil}, evil_buf)
+    evil_buf.seek(0)
     with pytest.raises(pickle.UnpicklingError):
-        SafeUnpickler(evil).load()
+        SafeUnpickler(evil_buf).load()
 
 
 def test_allows_plain_arrays():

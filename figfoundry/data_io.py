@@ -55,6 +55,10 @@ class SafeUnpickler(pickle.Unpickler):
         ("numpy.core.multiarray", "scalar"),
         ("numpy._core.multiarray", "_reconstruct"),  # numpy >= 2
         ("numpy._core.multiarray", "scalar"),
+        # NOTE: this set must stay in sync with the embedded _SafeUnpickler that
+        # canvas.dataset_loader_code emits into exported .py files (the preview
+        # and export both execute that code). Adding an entry here without adding
+        # it there would accept a file in-app that the export can't load.
     }
 
     def find_class(self, module, name):

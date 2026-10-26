@@ -110,6 +110,26 @@ def test_pie_skips_nonpositive(data_dir, tmp_path):
     plt.close(fig)
 
 
+# ------------------------------------------------------------ draft vs full
+def test_render_to_png_draft_vs_full(data_dir):
+    """draft=True: JPEG, no hotspots; draft=False: PNG + hit-test hotspots. Both
+    report the display size at the reference PREVIEW_DPI (the draft is stretched)."""
+    import base64
+
+    spec = _spec([_plot("p0", "line", x="@x", y="@y")])
+    full = canvas.render_to_png(spec)
+    assert full["mime"] == "image/png" and full["draft"] is False
+    assert base64.b64decode(full["img"])[:8] == b"\x89PNG\r\n\x1a\n"
+    assert full["img_w"] == round(7.4 * canvas.PREVIEW_DPI)
+    assert full["img_h"] == round(4.5 * canvas.PREVIEW_DPI)
+    assert any(h["id"] == "plot:p0" for h in full["hotspots"])
+    draft = canvas.render_to_png(spec, draft=True)
+    assert draft["mime"] == "image/jpeg" and draft["draft"] is True
+    assert draft["hotspots"] == []
+    assert base64.b64decode(draft["img"])[:2] == b"\xff\xd8"
+    assert (draft["img_w"], draft["img_h"]) == (full["img_w"], full["img_h"])
+
+
 # ---------------------------------------------------------- figure leaks
 def test_render_no_leak_when_build_fails(data_dir):
     spec = _spec([_plot("p0", "line", x="@x", y="@y")], dataset="missing.npz")
@@ -226,4 +246,194 @@ def test_wysiwyg_guarded_mixed_scene(data_dir, tmp_path):
     p3 = _plot("c", "surface", field="@y")                    # 1-D field -> skipped
     p4 = _plot("d", "step", y="@y")                           # x=None -> index
     spec = _spec([p1, p2, p3, p4])
+    assert _md5(canvas.build_figure(spec)) == _export_md5(spec, tmp_path)
+
+
+# ------------------------------------------------- dataset cache staleness
+def test_dataset_cache_invalidated_on_reupload(data_dir):
+    """Re-uploading a dataset under the same name must not keep serving the
+    cached (stale) arrays: the render re-reads the file from disk, so the signal
+    library has to track it. Keyed on (mtime, size), one entry per filename."""
+    import numpy as np
+
+    p = os.path.join(data_dir, "swap.npz")
+    np.savez(p, a=np.arange(5.0))
+    assert canvas.get_dataset_arrays("swap.npz")["a"].sum() == 10.0
+    # replace the file with different data (same name); nudge mtime so the
+    # invalidation key definitely changes
+    np.savez(p, a=np.arange(100.0))
+    now = os.stat(p).st_mtime + 5
+    os.utime(p, (now, now))
+    assert canvas.get_dataset_arrays("swap.npz")["a"].sum() == 4950.0
+    # a deletion must not be masked by the cache either
+    os.remove(p)
+    with pytest.raises(FileNotFoundError):
+        canvas.get_dataset_arrays("swap.npz")
+
+
+# ------------------------------------- mismatched signal lengths (all types)
+@pytest.mark.parametrize("ptype,data", [
+    ("line", {"x": "@x", "y": "@slices"}),          # 120 vs 5
+    ("step", {"x": "@x", "y": "@slices"}),
+    ("scatter", {"x": "@x", "y": "@slices"}),
+    ("bar", {"x": "@x", "y": "@slices"}),
+    ("barh", {"x": "@slices", "y": "@x"}),          # values vs categories
+    ("polar", {"x": "@x", "y": "@slices"}),
+    ("hist2d", {"x": "@x", "y": "@slices"}),
+    ("hexbin", {"x": "@x", "y": "@slices"}),
+    ("quiver", {"x": "@x", "y": "@slices"}),        # 1-D U/V length mismatch
+    ("scatter-grouped", {"x": "@x", "y": "@y", "z": "@slices"}),
+    ("decision-boundary", {"field": "@M", "x": "@x", "y": "@y", "z": "@slices"}),
+    ("scatter-3d", {"x": "@x", "y": "@y", "z": "@slices"}),
+])
+def test_mismatched_lengths_skip_not_crash(data_dir, ptype, data):
+    """The UI lets any signal drop into any slot; mismatched x/y (or z) lengths
+    used to raise inside the generated code (ValueError). Now the data call is
+    skipped and the panel stays blank."""
+    fig = canvas.build_figure(_spec([_plot("p0", ptype, **data)]))
+    plt.close(fig)
+
+
+def test_streamplot_shape_mismatch_skips(data_dir):
+    """Two 2-D U/V fields of different shapes used to crash streamplot."""
+    import numpy as np
+    p = os.path.join(data_dir, "vec.npz")
+    np.savez(p, U=np.ones((16, 16)), V=np.ones((16, 17)))
+    spec = _spec([_plot("p0", "streamplot", x="@U", y="@V")], dataset="vec.npz")
+    fig = canvas.build_figure(spec)
+    plt.close(fig)
+
+
+def test_quiver_2d_draws_vector_field(data_dir):
+    """quiver uses the 2-arg form quiver(U, V): the x/y slots hold the U/V fields
+    (per the UI labels) and must produce a real Quiver, not zero vectors."""
+    from matplotlib.quiver import Quiver
+    fig = canvas.build_figure(_spec([_plot("p0", "quiver", x="@M", y="@M")]))
+    assert any(isinstance(c, Quiver) for c in fig.axes[0].collections)
+    plt.close(fig)
+
+
+# ------------------------------------------------ all-NaN / degenerate data
+def test_hist_all_nan_skips(data_dir):
+    """hist() raises 'range not finite' on all-NaN (or +-inf) data."""
+    import numpy as np
+    p = os.path.join(data_dir, "nan.npz")
+    np.savez(p, nan=np.full(20, np.nan), inf=np.full(20, np.inf))
+    for sig in ("@nan", "@inf"):
+        spec = _spec([_plot("p0", "histogram", y=sig)], dataset="nan.npz")
+        fig = canvas.build_figure(spec)
+        plt.close(fig)
+    spec = _spec([_plot("p0", "hist2d", x="@nan", y="@inf")], dataset="nan.npz")
+    fig = canvas.build_figure(spec)
+    plt.close(fig)
+
+
+def test_contour_min_shape_skips(data_dir):
+    """contour/contourf need at least a (2, 2) field; a (1, 5) row used to raise
+    TypeError."""
+    import numpy as np
+    p = os.path.join(data_dir, "thin.npz")
+    np.savez(p, row=np.ones((1, 5)), col=np.ones((5, 1)),
+             x=np.arange(30.0), y=np.arange(30.0) * 0.1, group=np.repeat([0, 1], 15))
+    for field in ("@row", "@col"):
+        for ptype in ("contourf", "contour"):
+            spec = _spec([_plot("p0", ptype, field=field)], dataset="thin.npz")
+            fig = canvas.build_figure(spec)
+            assert len(fig.axes[0].collections) == 0
+            plt.close(fig)
+    # decision-boundary's contourf layer takes the same guard
+    spec = _spec([_plot("p0", "decision-boundary", field="@row", x="@x", y="@y", z="@group")],
+                 dataset="thin.npz")
+    fig = canvas.build_figure(spec)
+    plt.close(fig)
+
+
+def test_hotspots_align_with_skipped_plot(data_dir):
+    """A malformed plot in the middle (bad rect -> codegen skips its add_axes)
+    must not shift the axes index: plot c's bbox is c's, not b's."""
+    p_b = _plot("b", "line", x="@x", y="@y")
+    p_b["rect"] = "junk"  # codegen skips this plot entirely
+    p_c = _plot("c", "line", x="@x", y="@y")
+    p_c["rect"] = [0.55, 0.55, 0.3, 0.3]
+    spec = _spec([_plot("a", "line", x="@x", y="@y"), p_b, p_c])
+    fig = canvas.build_figure(spec)
+    fig.canvas.draw()
+    hs = canvas.hotspots_from_fig(fig, spec)
+    plt.close(fig)
+    got = {h["id"]: h for h in hs}
+    assert set(got) == {"plot:a", "plot:c"}
+    # plot:c must map to the second real axes, whose left edge is 0.55 in
+    # figure fraction -- clearly right of plot:a's 0.1
+    assert got["plot:c"]["x"] > got["plot:a"]["x"] + 0.2 * fig.get_figwidth() * fig.dpi
+
+
+# --------------------------------------------- malformed axes / spec fields
+def test_malformed_ticks_limits_do_not_crash(data_dir):
+    """xticks/yticks/xlim/ylim with junk values used to raise at codegen time
+    (500 on every endpoint) or exec time (ConversionError). They are sanitized to
+    finite floats; unusable settings are dropped."""
+    p = _plot("p0", "line", x="@x", y="@y")
+    p["axes"].update({"xticks": ["a", "b"], "yticks": 42, "xlim": [0], "ylim": "junk",
+                      "xscale": "weird", "tick_labelsize": "big"})
+    spec = _spec([p])
+    code = canvas.codegen_canvas(spec)  # no raise
+    compile(code, "<gen>", "exec")
+    assert "set_xticks" not in code and "set_xlim" not in code
+    fig = canvas.build_figure(spec)
+    plt.close(fig)
+
+
+def test_malformed_client_spec_degrades_to_blanks(data_dir):
+    """POST /render accepts a client-controlled spec: missing style/axes/title,
+    junk canvas numbers, an unknown plot type, a bad rect, and half-formed
+    artists must blank out, not 500 the whole render."""
+    spec = canvas.blank_spec()
+    spec["dataset"] = "sample.npz"
+    spec["canvas"] = {"width": "abc", "height": None, "dpi": "junk", "font_size": "big"}
+    spec["plots"] = [
+        {"id": "p0", "rect": [0.1, 0.1, 0.8, 0.8], "type": "line",
+         "data": {"x": "@x", "y": "@y"}},  # no style/axes/title -> defaults
+        {"id": "p1", "rect": "junk", "type": "weird"},  # bad rect, unknown type
+        {"id": "p2", "rect": [0.1, 0.6, 0.8, 0.3], "type": "line", "data": {"y": "@y"},
+         "artists": [{"type": "vline"}, {"type": "text", "x": 0.5}]},  # missing fields
+    ]
+    spec["figure_artists"] = [{"type": "text"}, {"type": "suptitle", "text": "T"}]
+    code = canvas.codegen_canvas(spec)
+    compile(code, "<gen>", "exec")
+    fig = canvas.build_figure(spec)
+    # p0 and p2 render; p1 is skipped; the suptitle survives the bad fig text
+    assert len(fig.axes) == 2
+    assert fig._suptitle is not None
+    plt.close(fig)
+
+
+# ----------------------------------------------------- pkl single-array
+def test_pkl_single_array_dataset(data_dir):
+    """A pickle of a bare ndarray is accepted at upload (data_io maps it to
+    {'data': ...}); the emitted loader used to crash on .items()."""
+    import pickle
+
+    import numpy as np
+    p = os.path.join(data_dir, "bare.pkl")
+    with open(p, "wb") as f:
+        pickle.dump(np.arange(10.0), f)
+    spec = _spec([_plot("p0", "line", y="@data")], dataset="bare.pkl")
+    fig = canvas.build_figure(spec)
+    assert len(fig.axes[0].lines) == 1
+    plt.close(fig)
+
+
+# ------------------------------------------------- WYSIWYG on new guards
+def test_wysiwyg_mismatch_and_nan_guards(data_dir, tmp_path):
+    """The new length/NaN/shape guards live in the generated code, so preview and
+    export stay byte-identical on a scene that trips all of them."""
+    import numpy as np
+    p = os.path.join(data_dir, "guard.npz")
+    np.savez(p, x=np.arange(120.0), y=np.sin(np.arange(120.0)),
+             nan=np.full(120, np.nan), row=np.ones((1, 5)), slices=np.array([3.0, 1, 4, 1, 5]))
+    p1 = _plot("a", "line", x="@x", y="@slices")   # mismatch -> skipped
+    p2 = _plot("b", "histogram", y="@nan")          # all-NaN -> skipped
+    p3 = _plot("c", "contourf", field="@row")       # thin field -> skipped
+    p4 = _plot("d", "bar", x="@x", y="@y")          # fine
+    spec = _spec([p1, p2, p3, p4], dataset="guard.npz")
     assert _md5(canvas.build_figure(spec)) == _export_md5(spec, tmp_path)

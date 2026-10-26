@@ -5,6 +5,7 @@ manipulates it; the backend renders it by EXECUTING the generated code (so the
 preview is byte-identical to the export); and it can serialize the spec to a
 standalone .py that references the dataset.
 """
+import contextlib
 import json
 import os
 import re
@@ -69,8 +70,16 @@ def _read(slug):
     p = _cpath(slug)
     if not os.path.exists(p):
         raise HTTPException(404, "canvas not found")
-    with open(p) as f:
-        return json.load(f)
+    try:
+        with open(p) as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:  # ValueError covers json.JSONDecodeError
+        raise HTTPException(500, "canvas file is corrupt") from e
+    # Every endpoint below does doc["spec"] / doc["spec"].get(...); a partial or
+    # hand-edited file without a dict spec would be a raw 500 KeyError/AttributeError.
+    if not isinstance(doc, dict) or not isinstance(doc.get("spec"), dict):
+        raise HTTPException(500, "canvas file is corrupt: missing spec")
+    return doc
 
 
 def _check_dataset_name(name):
@@ -134,16 +143,33 @@ def canvas_page():
 
 
 # --------------------------------------------------------------------------- datasets
+# The picker calls this on every open; re-parsing (unpickling!) each dataset file
+# every time is pure waste for large files. Cache per-file summaries keyed by
+# (mtime, size) -- a re-upload of the same name changes both, so it invalidates.
+_ds_list_cache = {}
+
+
 @app.get("/api/datasets")
 def list_datasets():
     out = []
     for f in sorted(os.listdir(data_io.DATA_DIR)):
         if f.endswith((".npz", ".pkl", ".pickle", ".csv")):
+            p = os.path.join(data_io.DATA_DIR, f)
             try:
-                arrays, kind = data_io.load_arrays(os.path.join(data_io.DATA_DIR, f))
-                out.append({"name": f, "kind": kind, "n_signals": len(arrays)})
+                st = os.stat(p)
+            except OSError:
+                continue
+            hit = _ds_list_cache.get(f)
+            if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
+                out.append(hit[2])
+                continue
+            try:
+                arrays, kind = data_io.load_arrays(p)
+                info = {"name": f, "kind": kind, "n_signals": len(arrays)}
             except Exception as e:
-                out.append({"name": f, "kind": "?", "n_signals": 0, "error": str(e)})
+                info = {"name": f, "kind": "?", "n_signals": 0, "error": str(e)}
+            _ds_list_cache[f] = (st.st_mtime, st.st_size, info)
+            out.append(info)
     return {"datasets": out}
 
 
@@ -174,9 +200,42 @@ async def upload_dataset(file: UploadFile = File(...)):
         arrays, kind = data_io.load_arrays_bytes(payload, name)
     except Exception as e:
         raise HTTPException(400, f"could not load dataset: {e}") from e
-    with open(os.path.join(data_io.DATA_DIR, name), "wb") as f:
-        f.write(payload)
+    try:
+        _write_atomic_bytes(os.path.join(data_io.DATA_DIR, name), payload)
+    except OSError as e:  # e.g. a filename character the OS refuses (newline on Windows)
+        raise HTTPException(400, f"could not save dataset: {e}") from e
+    # Belt and braces: canvas.get_dataset_arrays already invalidates by
+    # (mtime, size) on read, but dropping the entry here too guarantees the next
+    # signal-list call re-stats and re-loads the freshly uploaded file.
+    canvas._ds_cache.pop(name, None)
     return {"name": name, "kind": kind, "n_signals": len(arrays), "signals": data_io.list_signals(arrays)}
+
+
+def _write_atomic_bytes(path, payload):
+    """Atomic byte write (unique temp + rename) so a reader never sees a partial
+    file and two concurrent uploads of the same name can't clobber each other's
+    temp. The temp name is unique per thread: a shared "<path>.tmp" would let one
+    thread's os.replace grab the other's in-progress write. On Windows a
+    concurrent reader's handle can briefly refuse the rename, so retry it."""
+    tmp = f"{path}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(payload)
+        last = None
+        for _ in range(20):
+            try:
+                os.replace(tmp, path)
+                last = None
+                break
+            except PermissionError as e:
+                last = e
+                time.sleep(0.02)
+        if last is not None:
+            raise last
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
 
 
 # --------------------------------------------------------------------------- canvases
@@ -224,7 +283,8 @@ def delete_canvas(slug):
 def duplicate_canvas(slug):
     doc = _read(slug)
     newslug = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
-    newdoc = {"name": doc.get("name", "Untitled") + " copy", "spec": json.loads(json.dumps(doc["spec"])), "updated": time.time()}
+    name = str(doc.get("name") or "Untitled")  # a hand-edited file may hold a non-str
+    newdoc = {"name": name + " copy", "spec": json.loads(json.dumps(doc["spec"])), "updated": time.time()}
     _write(newslug, newdoc)
     return {"slug": newslug, "name": newdoc["name"]}
 
@@ -236,7 +296,12 @@ def canvas_signals(slug):
     ds = doc["spec"].get("dataset")
     if not ds:
         return {"dataset": None, "signals": []}
-    arrays = canvas.get_dataset_arrays(ds)
+    try:
+        arrays = canvas.get_dataset_arrays(ds)
+    except HTTPException:
+        raise
+    except Exception as e:  # dataset deleted from disk, or a non-str name in a hand-edited spec
+        raise HTTPException(400, f"could not load dataset: {e}") from e
     return {"dataset": ds, "signals": data_io.list_signals(arrays)}
 
 
@@ -252,16 +317,32 @@ def render_canvas(slug, body: CanvasBody | None = None):
 
 @app.get("/api/canvases/{slug}/code")
 def code_canvas(slug):
-    return JSONResponse({"code": canvas.codegen_canvas(_read(slug)["spec"])})
+    try:
+        code = canvas.codegen_canvas(_read(slug)["spec"])
+    except HTTPException:
+        raise  # _read's 404/500 must not be re-wrapped as a codegen failure
+    except Exception as e:
+        raise HTTPException(400, f"codegen failed: {e}") from e
+    return JSONResponse({"code": code})
 
 
 @app.get("/api/canvases/{slug}/download")
 def download_canvas(slug):
     doc = _read(slug)
-    fname = (doc.get("name", "canvas").strip().replace(" ", "_") or "canvas") + ".py"
+    try:
+        code = canvas.codegen_canvas(doc["spec"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"codegen failed: {e}") from e
+    # Same filename-safe character set as export_figure: the name is client-
+    # controlled, and FileResponse's Content-Disposition handling of it has
+    # changed across starlette versions (older ones quoted it raw).
+    base = str(doc.get("name") or "canvas").strip().replace(" ", "_") or "canvas"
+    fname = re.sub(r"[^A-Za-z0-9._-]", "_", base) + ".py"
     path = os.path.join(OUT_DIR, f"canvas_{slug}.py")
     with open(path, "w") as f:
-        f.write(canvas.codegen_canvas(doc["spec"]))
+        f.write(code)
     return FileResponse(path, filename=fname, media_type="text/x-python")
 
 
@@ -275,8 +356,13 @@ def export_figure(slug, format: str = "png"):
     if format not in _FIG_CT:
         raise HTTPException(400, "format must be png, svg, or pdf")
     doc = _read(slug)
-    data = canvas.render_to_bytes(doc["spec"], fmt=format)
-    base = doc.get("name", "figure").strip().replace(" ", "_") or "figure"
+    try:
+        data = canvas.render_to_bytes(doc["spec"], fmt=format)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"render failed: {e}") from e
+    base = str(doc.get("name") or "figure").strip().replace(" ", "_") or "figure"
     # The canvas name is client-controlled; keep the hand-built header value to
     # filename-safe characters so a quote/newline can't break Content-Disposition.
     fname = re.sub(r"[^A-Za-z0-9._-]", "_", base) + "." + format
