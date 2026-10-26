@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 import pytest
 
-from figfoundry.data_io import load_arrays, list_signals
+from figfoundry.data_io import list_signals, load_arrays
 
 
 def test_load_npz(tmp_path):
@@ -39,3 +39,37 @@ def test_rejects_bad_extension(tmp_path):
     p.write_text("a,b\n1,2\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_arrays(str(p))
+
+
+def test_csv_bom_and_empty_header_name(tmp_path):
+    # BOM (utf-8-sig) is stripped; an empty header cell falls back to col<i>.
+    p = tmp_path / "d.csv"
+    p.write_bytes(b"\xef\xbb\xbf,price\n1,2.5\n2,3.5\n")
+    arrays, kind = load_arrays(str(p))
+    assert kind == "csv"
+    assert set(arrays) == {"col0", "price"}
+    assert arrays["price"].tolist() == [2.5, 3.5]
+
+
+def test_csv_ragged_rows(tmp_path):
+    # Short rows are tolerated: missing cells are skipped, not errors.
+    p = tmp_path / "d.csv"
+    p.write_text("a,b\n1,2\n3\n", encoding="utf-8")
+    arrays, _ = load_arrays(str(p))
+    assert arrays["a"].tolist() == [1.0, 3.0]
+    assert arrays["b"].tolist() == [2.0]
+
+
+def test_csv_mixed_column_keeps_numeric_cells(tmp_path):
+    p = tmp_path / "d.csv"
+    p.write_text("a\n1\nfoo\n3\n", encoding="utf-8")
+    arrays, _ = load_arrays(str(p))
+    assert arrays["a"].tolist() == [1.0, 3.0]
+
+
+def test_csv_empty_file_yields_no_signals(tmp_path):
+    p = tmp_path / "d.csv"
+    p.write_text("", encoding="utf-8")
+    arrays, kind = load_arrays(str(p))
+    assert kind == "csv"
+    assert arrays == {}

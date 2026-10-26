@@ -41,13 +41,10 @@ function trackOverlays(ids, dx, dy) {
   overlay.querySelectorAll(".plotbox").forEach((d) => { if (plotIds.has(d.dataset.pid)) { const p = state.spec.plots.find((x) => x.id === d.dataset.pid); if (p) Object.assign(d.style, rectToCss(p.rect)); } });
   for (const id of ids) {
     if (id.startsWith("plot:")) continue;
-    const [kind, pid] = id.split(":");
-    let fdx = dx, fdy = dy;
-    if (kind === "title" || kind === "artist") { const p = state.spec.plots.find((x) => x.id === pid); if (!p) continue; fdx = dx * p.rect[2]; fdy = dy * p.rect[3]; }
     const div = document.querySelector(`.mov[data-id="${id}"]`);
     if (!div) continue;
-    div.style.left = (parseFloat(div.style.left) + fdx * 100) + "%";
-    div.style.top = (parseFloat(div.style.top) - fdy * 100) + "%";
+    div.style.left = (parseFloat(div.style.left) + dx * 100) + "%";
+    div.style.top = (parseFloat(div.style.top) - dy * 100) + "%";
   }
 }
 function offCanvasCount() {
@@ -191,7 +188,7 @@ function makeMovable(el, id, mode) {
     const shift = e.shiftKey;
     const handle = (e.target.dataset && e.target.dataset.h) || null;
     const startF = toFig(e.clientX, e.clientY);
-    let moved = false, onMove, onUp;
+    let moved = false, onMove, onUp, sx = 0, sy = 0;
     if (mode === "box") {
       const p = state.spec.plots.find((x) => x.id === id.slice(5));
       const rect0 = p.rect.slice();
@@ -218,14 +215,15 @@ function makeMovable(el, id, mode) {
           if (handle.includes("n")) t = cb; if (handle.includes("s")) b = cb;
           rect[0] = Math.min(l, rr); rect[2] = Math.abs(rr - l);
           rect[1] = Math.min(b, t); rect[3] = Math.abs(t - b);
-          p.rect = rect; Object.assign(el.style, rectToCss(rect));
-          drawGuides(snapRect(rect, others, r.img_w, r.img_h));
+          p.rect = rect;
+          drawGuides(snapRect(rect, others, r.img_w, r.img_h));  // snaps mutate rect (=== p.rect) in place
+          Object.assign(el.style, rectToCss(rect));
         }
         scheduleDraft();
         moved = true;
       };
     } else {
-      const sx = e.clientX, sy = e.clientY;
+      sx = e.clientX; sy = e.clientY;
       onMove = (ev) => {
         const dx = ev.clientX - sx, dy = ev.clientY - sy;
         if (dx || dy) { moved = true; el.style.transform = `translate(${dx}px,${dy}px)`; scheduleDraft(); }
@@ -237,7 +235,7 @@ function makeMovable(el, id, mode) {
       drawGuides([]);
       el.style.transform = "";
       if (!moved) { select(id, shift); return; }
-      if (mode !== "box") commitArtDrag(id, ev.clientX, ev.clientY);
+      if (mode !== "box") commitArtDrag(id, ev.clientX - sx, ev.clientY - sy);
       commit();
     };
     document.addEventListener("pointermove", onMove);
@@ -245,25 +243,28 @@ function makeMovable(el, id, mode) {
   });
 }
 
-function commitArtDrag(id, clientX, clientY) {
+function commitArtDrag(id, dxPx, dyPx) {
+  // Apply the drag DELTA (in figure fractions) to the element's own coordinates, so the
+  // element lands exactly where the user dropped it (the grab offset is preserved).
   const rect = figImg.getBoundingClientRect();
-  const fx = (clientX - rect.left) / rect.width, fyTop = (clientY - rect.top) / rect.height;
+  const dxF = dxPx / rect.width, dyF = -dyPx / rect.height;
   const r = state.spec;
   if (id.startsWith("title:")) {
     const pid = id.slice(6); const p = r.plots.find((x) => x.id === pid);
-    p.title.x = r4(clamp((fx - p.rect[0]) / p.rect[2], -0.6, 1.6));
-    p.title.y = r4(clamp(1 - (fyTop - (1 - (p.rect[1] + p.rect[3]))) / p.rect[3], -0.6, 1.6));
+    p.title.x = r4(clamp(p.title.x + dxF / p.rect[2], -0.6, 1.6));
+    p.title.y = r4(clamp(p.title.y + dyF / p.rect[3], -0.6, 1.6));
     p.title.visible = true;
   } else if (id.startsWith("artist:")) {
     const parts = id.split(":"); const pid = parts[1], j = +parts[2];
-    const p = r.plots.find((x) => x.id === pid); const a = p.artists[j];
-    if (a.type === "text" && a.axes_frac) {
-      a.x = r4(clamp((fx - p.rect[0]) / p.rect[2], -0.6, 1.6));
-      a.y = r4(clamp(1 - (fyTop - (1 - (p.rect[1] + p.rect[3]))) / p.rect[3], -0.6, 1.6));
+    const p = r.plots.find((x) => x.id === pid); const a = p && p.artists[j];
+    if (a && a.type === "text" && a.axes_frac) {
+      a.x = r4(clamp(a.x + dxF / p.rect[2], -0.6, 1.6));
+      a.y = r4(clamp(a.y + dyF / p.rect[3], -0.6, 1.6));
     }
   } else if (id.startsWith("figartist:")) {
     const j = +id.slice(10); const fa = r.figure_artists[j];
-    fa.x = r4(clamp(fx, 0, 1)); fa.y = r4(clamp(1 - fyTop, 0, 1));
+    if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dxF, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dyF, -0.2, 1.2)); }
+    else { fa.x = r4(clamp((fa.x || 0) + dxF, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dyF, -0.1, 1.1)); }
   }
 }
 
@@ -271,7 +272,7 @@ function commitArtDrag(id, clientX, clientY) {
 function select(id, additive) {
   if (additive) {
     if (state.selection.has(id)) state.selection.delete(id); else state.selection.add(id);
-    state.selected = state.selection.size ? id : null;
+    state.selected = state.selection.has(id) ? id : (state.selection.size ? [...state.selection].pop() : null);
   } else {
     state.selection = id ? new Set([id]) : new Set();
     state.selected = id;
@@ -284,7 +285,8 @@ function undo() { if (!state.history.length) return; state.future.push(clone(sta
 function redo() { if (!state.future.length) return; state.history.push(clone(state.spec)); state.spec = state.future.pop(); state.sliderSnapshot = null; updateHist(); commit(); }
 function updateHist() { $("#undoBtn").disabled = !state.history.length; $("#redoBtn").disabled = !state.future.length; }
 async function commit() {
-  await api(`/api/canvases/${state.slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: state.spec }) });
+  try { await api(`/api/canvases/${state.slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: state.spec }) }); }
+  catch (e) { toast("Save failed: " + e.message, true); }  // a failed save must not skip the full render
   await doRender(false);
 }
 
@@ -302,9 +304,9 @@ function nudgeSelected(dx, dy) {
 function nudgeOne(id, dx, dy) {
   const [kind, pid, j] = id.split(":");
   if (kind === "plot") { const p = state.spec.plots.find((x) => x.id === pid); if (p) { p.rect[0] = clamp(r4(p.rect[0] + dx), 0, 1); p.rect[1] = clamp(r4(p.rect[1] + dy), 0, 1); } }
-  else if (kind === "title") { const t = state.spec.plots.find((x) => x.id === pid)?.title; if (t) { t.x = r4(clamp(t.x + dx, -0.6, 1.6)); t.y = r4(clamp(t.y + dy, -0.6, 1.6)); t.visible = true; } }
+  else if (kind === "title") { const p = state.spec.plots.find((x) => x.id === pid); const t = p && p.title; if (t) { t.x = r4(clamp(t.x + dx / p.rect[2], -0.6, 1.6)); t.y = r4(clamp(t.y + dy / p.rect[3], -0.6, 1.6)); t.visible = true; } }
   else if (kind === "figartist") { const fa = state.spec.figure_artists[+pid]; if (fa) { if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dx, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dy, -0.2, 1.2)); } else { fa.x = r4(clamp((fa.x || 0) + dx, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dy, -0.1, 1.1)); } } }
-  else if (kind === "artist") { const a = state.spec.plots.find((x) => x.id === pid)?.artists[j]; if (a) { if (a.type === "text" && a.axes_frac) { a.x = r4(clamp(a.x + dx, -0.6, 1.6)); a.y = r4(clamp(a.y + dy, -0.6, 1.6)); } else if (a.type === "vline") a.x = r4(a.x + dx * 8); else if (a.type === "hline") a.y = r4(a.y + dy * 8); else if (a.type === "circle" || a.type === "ellipse") { a.x = r4(a.x + dx * 8); a.y = r4(a.y + dy * 8); } } }
+  else if (kind === "artist") { const p = state.spec.plots.find((x) => x.id === pid); const a = p && p.artists[j]; if (a) { if (a.type === "text" && a.axes_frac) { a.x = r4(clamp(a.x + dx / p.rect[2], -0.6, 1.6)); a.y = r4(clamp(a.y + dy / p.rect[3], -0.6, 1.6)); } else if (a.type === "vline") a.x = r4(a.x + dx * 8); else if (a.type === "hline") a.y = r4(a.y + dy * 8); else if (a.type === "circle" || a.type === "ellipse") { a.x = r4(a.x + dx * 8); a.y = r4(a.y + dy * 8); } } }
 }
 
 /* ---------------- signal drag -> create plot ---------------- */
@@ -392,6 +394,7 @@ function uploadDataset() {
 }
 function buildSignals() {
   const list = $("#signalList"); list.innerHTML = "";
+  state.signalSel.clear();  // refs from a previous dataset are invalid for the new signal list
   for (const s of state.signals) {
     const el = document.createElement("div"); el.className = "signal" + (state.signalSel.has(s.ref) ? " sel" : "");
     const cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "sig-check"; cb.checked = state.signalSel.has(s.ref);
@@ -921,8 +924,8 @@ function buildFigartistInspector(body, j) {
     (fa.labels || []).forEach((lb, i) => {
       const row = document.createElement("div"); row.className = "num-row";
       const tin = document.createElement("input"); tin.type = "text"; tin.value = lb; tin.style.flex = "2";
-      tin.addEventListener("input", () => { fa.labels[i] = tin.value; scheduleDraft(); });
-      tin.addEventListener("change", () => { pushHist(); fa.labels[i] = tin.value; commit(); });
+      tin.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); fa.labels[i] = tin.value; scheduleDraft(); });
+      tin.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
       const mk = document.createElement("select"); mk.className = "ctl-sel"; mk.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
       for (const [v, l] of [["", "— line"], ["o", "o dot"], ["^", "^ tri"], ["s", "s sq"], ["D", "D dia"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; mk.appendChild(o); }
       mk.value = (fa.handles[i] && fa.handles[i].marker) || "";
@@ -1029,16 +1032,16 @@ function slider(label, path, val, min, max, step, afterChange) {
 function text(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const inp = document.createElement("input"); inp.type = "text"; inp.value = val == null ? "" : val;
-  inp.addEventListener("input", () => { setPath(state.spec, path, inp.value); scheduleDraft(); });
-  inp.addEventListener("change", () => { pushHist(); setPath(state.spec, path, inp.value); commit(); });
+  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); scheduleDraft(); });
+  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
   w.appendChild(inp); return w;
 }
 function ticksText(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : "";
   const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
-  inp.addEventListener("input", () => { setPath(state.spec, path, parse()); scheduleDraft(); });
-  inp.addEventListener("change", () => { pushHist(); setPath(state.spec, path, parse()); commit(); });
+  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
+  inp.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
   w.appendChild(inp); return w;
 }
 function num2(label, path, val) {
@@ -1047,8 +1050,8 @@ function num2(label, path, val) {
   const a = document.createElement("input"), b = document.createElement("input"), sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "–"; a.type = b.type = "text";
   a.value = val ? val[0] : ""; b.value = val ? val[1] : "";
   const parse = () => { const x = parseFloat(a.value), y = parseFloat(b.value); return (a.value && b.value && !isNaN(x) && !isNaN(y)) ? [x, y] : null; };
-  a.addEventListener("input", () => { setPath(state.spec, path, parse()); scheduleDraft(); }); b.addEventListener("input", () => { setPath(state.spec, path, parse()); scheduleDraft(); });
-  a.addEventListener("change", () => { pushHist(); setPath(state.spec, path, parse()); commit(); }); b.addEventListener("change", () => { pushHist(); setPath(state.spec, path, parse()); commit(); });
+  a.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); }); b.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
+  a.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); }); b.addEventListener("change", () => { if (state.sliderSnapshot !== null) { state.history.push(state.sliderSnapshot); state.future = []; state.sliderSnapshot = null; updateHist(); } commit(); });
   row.append(a, sep, b); w.appendChild(row); return w;
 }
 function color(label, path, val) {
@@ -1178,10 +1181,11 @@ function v3dWire() {
   img.addEventListener("pointerup", () => { drag = null; });
   img.addEventListener("wheel", (e) => { e.preventDefault(); const s = v3d.invertZ ? -1 : 1; v3d.dist = clamp(v3d.dist + (e.deltaY > 0 ? 0.6 : -0.6) * s, 3, 22); v3dSync(); }, { passive: false });
   $("#v3dAccept").onclick = () => {
+    pushHist();
     const p = state.spec.plots.find((x) => x.id === v3d.pid);
     p.style.elev = v3d.elev; p.style.azim = v3d.azim; p.style.dist = v3d.dist;
     $("#view3dModal").classList.add("hidden");
-    pushHist(); commit();
+    commit();
   };
   const close = () => $("#view3dModal").classList.add("hidden");
   $("#v3dCancel").onclick = close; $("#view3dClose").onclick = close;
@@ -1256,7 +1260,7 @@ function wireChrome() {
   let pan = null, spaceDown = false;
   stage.addEventListener("wheel", (e) => { if (!state.render) return; e.preventDefault(); setZoom(state.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12), e.clientX, e.clientY); }, { passive: false });
   stage.addEventListener("pointerdown", (e) => {
-    const empty = e.target === stage || e.target === stageInner || e.target === figImg;
+    const empty = e.target === stage || e.target === stageInner || e.target === figImg || e.target === overlay;
     if (e.button === 1 || (e.button === 0 && (empty || spaceDown))) {
       e.preventDefault();
       pan = { x: e.clientX, y: e.clientY, px: state.pan.x, py: state.pan.y, clickEmpty: e.button === 0 && empty && !spaceDown };
@@ -1267,7 +1271,8 @@ function wireChrome() {
   window.addEventListener("keydown", (e) => { if (e.code === "Space" && !/INPUT|SELECT|TEXTAREA/.test(e.target.tagName || "")) { spaceDown = true; stage.style.cursor = "grab"; } });
   window.addEventListener("keyup", (e) => { if (e.code === "Space") { spaceDown = false; stage.style.cursor = ""; } });
   document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" && e.target.type === "text") { if (e.key === "Escape") e.target.blur(); return; }
+    const tgt = e.target;
+    if (tgt.isContentEditable || tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA") { if (tgt.tagName === "INPUT" && tgt.type === "text" && e.key === "Escape") tgt.blur(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
     else if (e.key === "Escape") { if (!$("#exportModal").classList.contains("hidden")) $("#exportModal").classList.add("hidden"); else select(null); }
@@ -1277,12 +1282,17 @@ function wireChrome() {
       const ids = state.selection.size ? [...state.selection] : [state.selected];
       const plotIds = new Set(ids.filter((id) => id.startsWith("plot:")).map((id) => id.slice(5)));
       if (plotIds.size) state.spec.plots = state.spec.plots.filter((p) => !plotIds.has(p.id));
+      const artDel = new Map(), lineDel = new Map(), figDel = [];
       for (const id of ids) {
-        if (id.startsWith("artist:")) { const [, pid, j] = id.split(":"); const p = state.spec.plots.find((x) => x.id === pid); if (p) p.artists.splice(+j, 1); }
-        else if (id.startsWith("line:")) { const [, pid, j] = id.split(":"); const p = state.spec.plots.find((x) => x.id === pid); if (p && p.extra_lines) p.extra_lines.splice(+j, 1); }
-        else if (id.startsWith("figartist:")) state.spec.figure_artists.splice(+id.slice(10), 1);
+        if (id.startsWith("artist:")) { const [, pid, j] = id.split(":"); if (!artDel.has(pid)) artDel.set(pid, []); artDel.get(pid).push(+j); }
+        else if (id.startsWith("line:")) { const [, pid, j] = id.split(":"); if (!lineDel.has(pid)) lineDel.set(pid, []); lineDel.get(pid).push(+j); }
+        else if (id.startsWith("figartist:")) figDel.push(+id.slice(10));
         else if (id.startsWith("title:")) { const p = state.spec.plots.find((x) => x.id === id.slice(6)); if (p) p.title.visible = false; }
       }
+      // splice high-to-low so deleting several items at once doesn't shift the other indices
+      for (const [pid, js] of artDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p) js.sort((a, b) => b - a).forEach((j) => p.artists.splice(j, 1)); }
+      for (const [pid, js] of lineDel) { const p = state.spec.plots.find((x) => x.id === pid); if (p && p.extra_lines) js.sort((a, b) => b - a).forEach((j) => p.extra_lines.splice(j, 1)); }
+      figDel.sort((a, b) => b - a).forEach((j) => state.spec.figure_artists.splice(j, 1));
       select(null); commit();
     }
   });

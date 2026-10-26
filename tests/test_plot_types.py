@@ -3,8 +3,6 @@ and vector formats (svg/pdf) come out with the right magic bytes."""
 import hashlib
 import io
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pytest
 
@@ -95,3 +93,18 @@ def test_palettes_nonempty():
     assert "Okabe-Ito (colorblind-safe)" in pals
     for colors in pals.values():
         assert all(c.startswith("#") and len(c) == 7 for c in colors)
+
+
+def test_3d_and_polar_projection_in_codegen(data_dir):
+    """3-D types emit a 3d projection axis; polar emits a polar one (round-trip
+    through build_figure is already covered by test_wysiwyg_per_type)."""
+    for ptype, proj in [("scatter-3d", "projection='3d'"), ("surface", "projection='3d'"),
+                        ("wireframe", "projection='3d'"), ("polar", "projection='polar'")]:
+        spec = canvas.blank_spec()
+        spec["dataset"] = "sample.npz"
+        p = canvas._new_plot("p0", [0.1, 0.15, 0.8, 0.7], "@x", "@y")
+        p["type"] = ptype
+        p["data"]["z"] = "@s"
+        p["data"]["field"] = "@M"
+        spec["plots"] = [p]
+        assert proj in canvas.codegen_canvas(spec)

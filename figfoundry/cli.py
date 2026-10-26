@@ -19,7 +19,7 @@ import webbrowser
 import uvicorn
 
 from . import __version__, canvas, data_io
-from .app import app, CANVAS_DIR, OUT_DIR
+from .app import CANVAS_DIR, OUT_DIR, app
 
 
 def _read_canvas(slug):
@@ -51,7 +51,8 @@ def cmd_list(a):
         if not f.endswith(".json"):
             continue
         try:
-            d = json.load(open(os.path.join(CANVAS_DIR, f)))
+            with open(os.path.join(CANVAS_DIR, f)) as fh:
+                d = json.load(fh)
             rows.append((f[:-5], d.get("name", "Untitled"), len(d.get("spec", {}).get("plots", []))))
         except Exception:
             continue

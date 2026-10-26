@@ -60,10 +60,10 @@ Your figures, datasets, and exports live in `~/.figfoundry/`.
 
 - Drag a signal onto the canvas to make a plot (or onto an existing plot to
   overlay a line / σ-band / error bars / replace).
-- **Plot types (20):** line, step, scatter, grouped scatter (clustering), bar,
+- **Plot types (23):** line, step, scatter, grouped scatter (clustering), bar,
   bar (horizontal), histogram, box plot, violin plot, 2-D histogram, hexbin, image,
   contour (filled / lines), pcolormesh, vector field, streamplot, decision boundary,
-  pie, polar.
+  pie, polar, 3-D scatter, surface (3-D), wireframe (3-D).
 - Move, resize (with snapping), and nudge (arrow keys) plots and elements.
 - Multi-select (Shift+click) to nudge / move / delete several at once.
 - Per-plot: data, color, line/marker, σ-band, error bars, ticks, labels, limits,

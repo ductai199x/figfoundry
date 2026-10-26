@@ -3,8 +3,6 @@ so they must produce byte-identical figures."""
 import hashlib
 import io
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from figfoundry import canvas

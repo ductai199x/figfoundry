@@ -19,7 +19,7 @@
       </div>
 
       <div class="picker-create">
-        <a class="card create" id="newCanvas">
+        <a class="card create" id="newCanvas" href="#">
           <div class="thumb thumb-blank"><span class="blank-glyph">+ New figure</span></div>
           <div class="meta"><h3>New figure</h3><p>Start blank, load a dataset, then drag signals onto the canvas.</p></div>
         </a>
@@ -67,7 +67,7 @@
         grid.appendChild(card);
         fetch("/api/canvases/" + c.slug + "/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
           .then((r) => r.json())
-          .then((res) => { if (!res.img) return; const img = document.createElement("img"); img.src = "data:" + (res.mime || "image/png") + ";base64," + res.img; card.querySelector(".thumb").appendChild(img); })
+          .then((res) => { if (!res.img) return; const img = document.createElement("img"); img.alt = c.name; img.src = "data:" + (res.mime || "image/png") + ";base64," + res.img; card.querySelector(".thumb").appendChild(img); })
           .catch(() => {});
       }
     }

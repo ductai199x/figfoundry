@@ -8,17 +8,19 @@ installed).
 import os
 import sys
 
+import matplotlib
 import numpy as np
 import pytest
 
+matplotlib.use("Agg")  # headless backend for all tests (conftest imports before test modules)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 @pytest.fixture
 def data_dir(tmp_path, monkeypatch):
     """Point the app at a temp data dir and create a small neutral dataset there."""
-    from figfoundry import data_io
     import figfoundry.canvas as canvas
+    from figfoundry import data_io
 
     d = tmp_path / "datasets"
     d.mkdir()

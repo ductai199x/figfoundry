@@ -11,7 +11,7 @@
   <div id="editor" class="editor">
     <header class="topbar">
       <button id="backBtn" class="iconbtn" title="Back to figures">&#8592;</button>
-      <input id="figName" class="fig-name" value="Untitled" spellcheck="false" title="Rename this figure (saves on blur)">
+      <input id="figName" class="fig-name" value="Untitled" spellcheck="false" aria-label="Figure name" title="Rename this figure (saves on blur)">
       <button id="duplicateBtn" class="iconbtn" title="Duplicate this figure">&#10697;</button>
       <button id="deleteBtn" class="iconbtn" title="Delete this figure">&#128465;</button>
       <div class="topbar-spacer"></div>
@@ -41,12 +41,12 @@
       <main class="canvas-wrap">
         <div id="stage" class="stage">
           <div class="stage-inner" id="stageInner">
-            <img id="figImg" alt="figure" draggable="false">
+            <img id="figImg" alt="Figure preview" draggable="false">
             <div id="overlay" class="overlay"></div>
             <div id="guides" class="guides"></div>
           </div>
         </div>
-        <div class="canvas-hint">
+        <div id="canvasHint" class="canvas-hint">
           Drag a signal onto the canvas to add a plot &nbsp;&middot;&nbsp; Drag a plot to move it, its handles to resize (snaps to align)
           &nbsp;&middot;&nbsp; Click to select
         </div>
@@ -59,10 +59,10 @@
     </div>
   </div>
 
-  <div id="exportModal" class="modal hidden">
+  <div id="exportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="exportModalTitle">
     <div class="modal-card">
       <div class="modal-head">
-        <h2>Generated code</h2>
+        <h2 id="exportModalTitle">Generated code</h2>
         <button id="modalClose" class="iconbtn" title="Close">&#10005;</button>
       </div>
       <p class="modal-sub">Reproduces the figure exactly. References the canvas dataset file.</p>
@@ -84,10 +84,10 @@
     </div>
   </div>
 
-  <div id="view3dModal" class="modal hidden">
+  <div id="view3dModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="view3dTitle">
     <div class="modal-card view3d-card">
       <div class="modal-head">
-        <h2>3-D view</h2>
+        <h2 id="view3dTitle">3-D view</h2>
         <button id="view3dClose" class="iconbtn" title="Close">&#10005;</button>
       </div>
       <p class="modal-sub">Drag the preview to rotate, scroll to zoom. Adjust, then accept to apply it to the figure.</p>
@@ -96,17 +96,17 @@
       </div>
       <div class="view3d-ctl">
         <div class="v3-row">
-          <span class="v3-lab">Elevation</span>
+          <label class="v3-lab" for="v3e">Elevation</label>
           <input type="range" id="v3e" class="v3-range" min="-90" max="90" step="1">
           <span class="v3-val" id="v3eVal">30&deg;</span>
         </div>
         <div class="v3-row">
-          <span class="v3-lab">Azimuth</span>
+          <label class="v3-lab" for="v3a">Azimuth</label>
           <input type="range" id="v3a" class="v3-range" min="-180" max="180" step="1">
           <span class="v3-val" id="v3aVal">-60&deg;</span>
         </div>
         <div class="v3-row">
-          <span class="v3-lab">Zoom</span>
+          <label class="v3-lab" for="v3d">Zoom</label>
           <input type="range" id="v3d" class="v3-range" min="3" max="22" step="0.5">
           <span class="v3-val" id="v3dVal">10</span>
         </div>
@@ -124,7 +124,7 @@
     </div>
   </div>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
 
   <script src="/static/canvas.js"></script>
 </body>

@@ -4,19 +4,39 @@ version = "0.1.0"
 description = "WYSIWYG matplotlib figure composer: load data (.npz/.pkl), drag signals onto a canvas to build plots, and export clean reproducible code."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Tai D. Nguyen" }]
+license = "MIT"
+authors = [{ name = "Tai Duc Nguyen", email = "taiducnguyen.drexel@gmail.com" }]
+keywords = ["matplotlib", "figures", "plotting", "wysiwyg", "data-visualization", "scientific-figures"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
-    "matplotlib>=3.8",
+    "matplotlib>=3.9",
     "numpy>=1.24",
-    "pillow>=10.0",
+    "pydantic>=2.0",
     "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx2>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/ductai199x/figfoundry"
+Repository = "https://github.com/ductai199x/figfoundry"
+Issues = "https://github.com/ductai199x/figfoundry/issues"
 
 [project.scripts]
 figfoundry = "figfoundry.cli:main"

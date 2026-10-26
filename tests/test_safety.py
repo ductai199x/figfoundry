@@ -23,3 +23,17 @@ def test_allows_plain_arrays():
     data = SafeUnpickler(good).load()
     assert list(data) == ["x"]
     assert data["x"].shape == (5,)
+
+
+class _ForeignClass:
+    """Module-level so pickle can reference it (a local class is not picklable)."""
+
+
+def test_blocks_foreign_classes():
+    # Anything not from numpy or the plain built-in containers is rejected,
+    # including classes defined in arbitrary modules.
+    evil = io.BytesIO()
+    pickle.dump({"x": np.arange(3.0), "o": _ForeignClass()}, evil)
+    evil.seek(0)
+    with pytest.raises(pickle.UnpicklingError):
+        SafeUnpickler(evil).load()

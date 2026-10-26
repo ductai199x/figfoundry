@@ -11,7 +11,7 @@ import re
 import threading
 import time
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -56,15 +56,21 @@ def _cpath(slug):
     return os.path.join(CANVAS_DIR, f"{slug}.json")
 
 
-def _read(slug):
+def _check_slug(slug):
     # Slugs are generated as <timestamp>-<hex>; reject anything with path separators
-    # so a crafted slug can't traverse out of the canvases dir.
+    # (including %-decoded ones, e.g. "..%2F..%2Fetc") so a crafted slug can't
+    # traverse out of the canvases dir.
     if not re.fullmatch(r"[A-Za-z0-9_-]+", slug):
         raise HTTPException(404, "canvas not found")
+
+
+def _read(slug):
+    _check_slug(slug)
     p = _cpath(slug)
     if not os.path.exists(p):
         raise HTTPException(404, "canvas not found")
-    return json.load(open(p))
+    with open(p) as f:
+        return json.load(f)
 
 
 def _check_dataset_name(name):
@@ -77,11 +83,28 @@ _write_lock = threading.Lock()
 
 def _write(slug, doc):
     # Serialize writes (threadpool) and make each atomic (temp + rename) so a reader
-    # never sees a partial/corrupt file.
+    # never sees a partial/corrupt file. On Windows a concurrent reader's open handle
+    # can briefly refuse the rename, so retry it; clean up the temp on any failure.
     with _write_lock:
         tmp = _cpath(slug) + ".tmp"
-        json.dump(doc, open(tmp, "w"), indent=2)
-        os.replace(tmp, _cpath(slug))
+        try:
+            with open(tmp, "w") as f:
+                json.dump(doc, f, indent=2)
+            last = None
+            for _ in range(20):
+                try:
+                    os.replace(tmp, _cpath(slug))
+                    last = None
+                    break
+                except PermissionError as e:
+                    last = e
+                    time.sleep(0.02)
+            if last is not None:
+                raise last
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
 
 
 def _list_canvases():
@@ -90,7 +113,8 @@ def _list_canvases():
         if not f.endswith(".json"):
             continue
         try:
-            doc = json.load(open(os.path.join(CANVAS_DIR, f)))
+            with open(os.path.join(CANVAS_DIR, f)) as fh:
+                doc = json.load(fh)
             out.append({"slug": f[:-5], "name": doc.get("name", "Untitled"),
                         "plots": len(doc.get("spec", {}).get("plots", [])), "updated": doc.get("updated")})
         except Exception:
@@ -133,24 +157,25 @@ def dataset_signals(name):
     try:
         arrays, kind = data_io.load_arrays(path)
     except Exception as e:
-        raise HTTPException(400, f"could not load dataset: {e}")
+        raise HTTPException(400, f"could not load dataset: {e}") from e
     return {"dataset": name, "kind": kind, "signals": data_io.list_signals(arrays)}
 
 
 @app.post("/api/datasets")
 async def upload_dataset(file: UploadFile = File(...)):
-    """Upload a .npz / .pkl dataset. pkl goes through the whitelist SafeUnpickler."""
+    """Upload a .npz / .pkl / .csv dataset. pkl goes through the whitelist
+    SafeUnpickler. The payload is validated before it is written, so a bad upload
+    can never clobber an existing dataset of the same name."""
     name = os.path.basename(file.filename or "upload")
     if not name.endswith((".npz", ".pkl", ".pickle", ".csv")):
         raise HTTPException(400, "only .npz / .pkl / .csv datasets are supported")
-    dest = os.path.join(data_io.DATA_DIR, name)
-    with open(dest, "wb") as f:
-        f.write(await file.read())
+    payload = await file.read()
     try:
-        arrays, kind = data_io.load_arrays(dest)
+        arrays, kind = data_io.load_arrays_bytes(payload, name)
     except Exception as e:
-        os.remove(dest)
-        raise HTTPException(400, f"could not load dataset: {e}")
+        raise HTTPException(400, f"could not load dataset: {e}") from e
+    with open(os.path.join(data_io.DATA_DIR, name), "wb") as f:
+        f.write(payload)
     return {"name": name, "kind": kind, "n_signals": len(arrays), "signals": data_io.list_signals(arrays)}
 
 
@@ -188,6 +213,7 @@ def update_canvas(slug, body: UpdateCanvasBody):
 
 @app.delete("/api/canvases/{slug}")
 def delete_canvas(slug):
+    _check_slug(slug)
     p = _cpath(slug)
     if os.path.exists(p):
         os.remove(p)
@@ -221,7 +247,7 @@ def render_canvas(slug, body: CanvasBody | None = None):
     try:
         return canvas.render_to_png(spec, draft=draft)
     except Exception as e:
-        raise HTTPException(400, f"render failed: {e}")
+        raise HTTPException(400, f"render failed: {e}") from e
 
 
 @app.get("/api/canvases/{slug}/code")
@@ -234,7 +260,8 @@ def download_canvas(slug):
     doc = _read(slug)
     fname = (doc.get("name", "canvas").strip().replace(" ", "_") or "canvas") + ".py"
     path = os.path.join(OUT_DIR, f"canvas_{slug}.py")
-    open(path, "w").write(canvas.codegen_canvas(doc["spec"]))
+    with open(path, "w") as f:
+        f.write(canvas.codegen_canvas(doc["spec"]))
     return FileResponse(path, filename=fname, media_type="text/x-python")
 
 
@@ -249,7 +276,10 @@ def export_figure(slug, format: str = "png"):
         raise HTTPException(400, "format must be png, svg, or pdf")
     doc = _read(slug)
     data = canvas.render_to_bytes(doc["spec"], fmt=format)
-    fname = (doc.get("name", "figure").strip().replace(" ", "_") or "figure") + "." + format
+    base = doc.get("name", "figure").strip().replace(" ", "_") or "figure"
+    # The canvas name is client-controlled; keep the hand-built header value to
+    # filename-safe characters so a quote/newline can't break Content-Disposition.
+    fname = re.sub(r"[^A-Za-z0-9._-]", "_", base) + "." + format
     return Response(content=data, media_type=_FIG_CT[format],
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 

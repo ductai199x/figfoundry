@@ -18,9 +18,13 @@ install has something to open; users load their own ``.npz``/``.pkl`` to work wi
 real data. Nothing in this module depends on any particular project's data.
 """
 import builtins
+import contextlib
+import csv
 import importlib
+import io
 import os
 import pickle
+from typing import ClassVar
 
 import numpy as np
 
@@ -35,18 +39,30 @@ BUNDLED_DATA_DIR = os.path.join(HERE, "datasets")
 
 
 class SafeUnpickler(pickle.Unpickler):
-    """Whitelist unpickler: only numpy (its arrays and the internal multiarray/dtype
-    reconstruction routines it pickles with) plus plain built-in containers. Anything
-    from os, subprocess, socket, ctypes, or a non-container builtin (exec, __import__,
-    ...) raises UnpicklingError, so a malicious pickle cannot execute code."""
-    _SAFE_BUILTINS = {"tuple", "list", "dict", "set"}
+    """Whitelist unpickler: only the numpy reconstruction machinery (the exact
+    (module, name) pairs numpy uses to pickle arrays and scalars) plus plain
+    built-in containers. Anything else -- os, subprocess, socket, ctypes, non-container
+    builtins (exec, __import__), and numpy's own callables (np.load, np.fromfile, ...)
+    -- raises UnpicklingError, so a malicious pickle cannot execute code or read files.
+    numpy is matched by exact name, not module prefix: a pickle can pass any allowed
+    attribute as the callable its reducer invokes, so the prefix form let
+    ``numpy.fromfile`` (arbitrary file read) through."""
+    _SAFE_BUILTINS: ClassVar = {"tuple", "list", "dict", "set"}
+    _SAFE_NUMPY: ClassVar = {
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+        ("numpy.core.multiarray", "_reconstruct"),   # numpy < 2
+        ("numpy.core.multiarray", "scalar"),
+        ("numpy._core.multiarray", "_reconstruct"),  # numpy >= 2
+        ("numpy._core.multiarray", "scalar"),
+    }
 
     def find_class(self, module, name):
         if module == "builtins":
             if name not in self._SAFE_BUILTINS:
                 raise pickle.UnpicklingError(f"blocked unsafe pickle class {module}.{name}")
             return getattr(builtins, name)
-        if module == "numpy" or module.startswith("numpy."):
+        if (module, name) in self._SAFE_NUMPY:
             return getattr(importlib.import_module(module), name)
         raise pickle.UnpicklingError(f"blocked unsafe pickle class {module}.{name}")
 
@@ -63,9 +79,14 @@ def _numeric_dict(obj):
         for k, v in obj.items():
             if str(k).startswith("__"):  # metadata, not a signal
                 continue
-            a = np.asarray(v)
-            if a.dtype == object or a.size == 0:
+            try:
+                a = np.asarray(v)
+            except (TypeError, ValueError):
+                continue  # ragged / non-arrayable values are not signals
+            if a.size == 0 or a.ndim == 0:
                 continue
+            if a.dtype == object or a.dtype.kind in ("U", "S"):
+                continue  # text, not numbers
             out[str(k)] = a
         return out
     if isinstance(obj, np.ndarray):
@@ -73,36 +94,60 @@ def _numeric_dict(obj):
     raise ValueError("dataset must be a dict of arrays or a single array")
 
 
-def _load_csv(path):
-    """Load a CSV with a header row into {column_name: 1-D float array}."""
-    import csv
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
+def _csv_to_arrays(rows):
+    """Header row + data rows -> {column_name: 1-D float array}. Non-numeric columns
+    are dropped (a figure tool plots numbers); duplicate header names get a _2/_3
+    suffix instead of silently overwriting each other."""
     out = {}
     for i, col in enumerate(rows[0] if rows else []):
         col = col.strip() or f"col{i}"
         vals = []
         for r in rows[1:]:
             if i < len(r):
-                try:
+                with contextlib.suppress(ValueError):
                     vals.append(float(r[i]))
-                except ValueError:
-                    pass
         if vals:
-            out[col] = np.asarray(vals, dtype=float)
+            name, n = col, 2
+            while name in out:
+                name = f"{col}_{n}"
+                n += 1
+            out[name] = np.asarray(vals, dtype=float)
     return out
+
+
+def _load_csv(path):
+    """Load a CSV with a header row into {column_name: 1-D float array}."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
+    return _csv_to_arrays(rows)
 
 
 def load_arrays(path):
     """Load a .npz/.pkl/.csv file into ({name: ndarray}, kind)."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".npz":
-        raw = np.load(path, allow_pickle=False)  # safe: no pickle deserialization
-        return _numeric_dict({k: raw[k] for k in raw.files}), "npz"
+        with np.load(path, allow_pickle=False) as raw:  # safe: no pickle deserialization
+            return _numeric_dict({k: raw[k] for k in raw.files}), "npz"
     if ext in (".pkl", ".pickle"):
         return _numeric_dict(safe_load_pkl(path)), "pkl"
     if ext == ".csv":
         return _load_csv(path), "csv"
+    raise ValueError(f"unsupported dataset format: {ext}")
+
+
+def load_arrays_bytes(data, filename):
+    """Validate/parse dataset bytes exactly like load_arrays, without a file on disk.
+    The upload endpoint uses it to reject a bad file before it can replace an
+    existing dataset of the same name."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".npz":
+        with np.load(io.BytesIO(data), allow_pickle=False) as raw:
+            return _numeric_dict({k: raw[k] for k in raw.files}), "npz"
+    if ext in (".pkl", ".pickle"):
+        return _numeric_dict(SafeUnpickler(io.BytesIO(data)).load()), "pkl"
+    if ext == ".csv":
+        rows = [r for r in csv.reader(io.StringIO(data.decode("utf-8-sig"))) if any(c.strip() for c in r)]
+        return _csv_to_arrays(rows), "csv"
     raise ValueError(f"unsupported dataset format: {ext}")
 
 
