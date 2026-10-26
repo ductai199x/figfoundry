@@ -48,8 +48,9 @@ build-backend = "hatchling.build"
 packages = ["figfoundry"]
 
 [tool.hatch.build.targets.sdist]
-# tests/ is dev-only; keep it out of the published source distribution
-exclude = ["tests"]
+# tests/ is dev-only; media/ (README screenshots) and .github/ (CI) are not
+# needed to install the package, so keep them out of the source distribution.
+exclude = ["tests", "media", ".github", "dist"]
 
 [tool.ruff]
 line-length = 110
