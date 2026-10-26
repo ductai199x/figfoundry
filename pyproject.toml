@@ -1,6 +1,6 @@
 [project]
 name = "figfoundry"
-version = "0.1.0"
+version = "0.2.0"
 description = "WYSIWYG matplotlib figure composer: load data (.npz/.pkl), drag signals onto a canvas to build plots, and export clean reproducible code."
 readme = "README.md"
 requires-python = ">=3.10"
