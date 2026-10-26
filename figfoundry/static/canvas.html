@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fig Foundry — Canvas</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/canvas.css">
+</head>
+<body>
+  <div id="editor" class="editor">
+    <header class="topbar">
+      <button id="backBtn" class="iconbtn" title="Back to figures">&#8592;</button>
+      <input id="figName" class="fig-name" value="Untitled" spellcheck="false" title="Rename this figure (saves on blur)">
+      <button id="duplicateBtn" class="iconbtn" title="Duplicate this figure">&#10697;</button>
+      <button id="deleteBtn" class="iconbtn" title="Delete this figure">&#128465;</button>
+      <div class="topbar-spacer"></div>
+      <div class="hist">
+        <button id="undoBtn" class="iconbtn" title="Undo (Ctrl+Z)">&#8630;</button>
+        <button id="redoBtn" class="iconbtn" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+      </div>
+      <button id="addPlotBtn" class="textbtn" title="Add an empty plot">+ Plot</button>
+      <button id="loadDataBtn" class="textbtn" title="Load a .npz / .pkl dataset">Load data&hellip;</button>
+      <div class="zoomctl">
+        <button id="zoomOut" class="iconbtn" title="Zoom out">&minus;</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+        <button id="zoomIn" class="iconbtn" title="Zoom in">+</button>
+        <button id="zoomFit" class="textbtn">Fit</button>
+      </div>
+      <button id="exportBtn" class="primary">Export code</button>
+    </header>
+
+    <div class="workspace">
+      <aside class="side">
+        <div class="panel-head">Signals &mdash; drag onto canvas</div>
+        <div id="signalList" class="signal-list"></div>
+        <div class="panel-head">Layers</div>
+        <div id="layersList" class="layers-list"></div>
+      </aside>
+
+      <main class="canvas-wrap">
+        <div id="stage" class="stage">
+          <div class="stage-inner" id="stageInner">
+            <img id="figImg" alt="figure" draggable="false">
+            <div id="overlay" class="overlay"></div>
+            <div id="guides" class="guides"></div>
+          </div>
+        </div>
+        <div class="canvas-hint">
+          Drag a signal onto the canvas to add a plot &nbsp;&middot;&nbsp; Drag a plot to move it, its handles to resize (snaps to align)
+          &nbsp;&middot;&nbsp; Click to select
+        </div>
+      </main>
+
+      <aside class="inspector">
+        <div class="panel-head" id="inspTitle">Canvas</div>
+        <div id="inspectorBody" class="inspector-body"></div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="exportModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Generated code</h2>
+        <button id="modalClose" class="iconbtn" title="Close">&#10005;</button>
+      </div>
+      <p class="modal-sub">Reproduces the figure exactly. References the canvas dataset file.</p>
+      <pre class="code"><code id="codeBody"></code></pre>
+      <div class="modal-fig">
+        <span class="fig-label">Figure:</span>
+        <button id="dlPng" class="textbtn">PNG</button>
+        <button id="dlSvg" class="textbtn">SVG</button>
+        <button id="dlPdf" class="textbtn">PDF</button>
+        <span class="fig-note">SVG / PDF are vector, for publication</span>
+      </div>
+      <div class="modal-actions">
+        <span id="codePath" class="code-path"></span>
+        <div class="modal-actions-right">
+          <button id="copyCode" class="textbtn">Copy</button>
+          <button id="downloadCode" class="primary">Download .py</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="view3dModal" class="modal hidden">
+    <div class="modal-card view3d-card">
+      <div class="modal-head">
+        <h2>3-D view</h2>
+        <button id="view3dClose" class="iconbtn" title="Close">&#10005;</button>
+      </div>
+      <p class="modal-sub">Drag the preview to rotate, scroll to zoom. Adjust, then accept to apply it to the figure.</p>
+      <div class="view3d-stage">
+        <img id="view3dImg" alt="3-D preview" draggable="false">
+      </div>
+      <div class="view3d-ctl">
+        <div class="v3-row">
+          <span class="v3-lab">Elevation</span>
+          <input type="range" id="v3e" class="v3-range" min="-90" max="90" step="1">
+          <span class="v3-val" id="v3eVal">30&deg;</span>
+        </div>
+        <div class="v3-row">
+          <span class="v3-lab">Azimuth</span>
+          <input type="range" id="v3a" class="v3-range" min="-180" max="180" step="1">
+          <span class="v3-val" id="v3aVal">-60&deg;</span>
+        </div>
+        <div class="v3-row">
+          <span class="v3-lab">Zoom</span>
+          <input type="range" id="v3d" class="v3-range" min="3" max="22" step="0.5">
+          <span class="v3-val" id="v3dVal">10</span>
+        </div>
+        <div class="v3-toggles">
+          <label class="v3-check"><input type="checkbox" id="v3invR"> Invert rotate</label>
+          <label class="v3-check"><input type="checkbox" id="v3invZ"> Invert zoom</label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <div class="modal-actions-right">
+          <button id="v3dCancel" class="textbtn">Cancel</button>
+          <button id="v3dAccept" class="primary">Accept view</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/canvas.js"></script>
+</body>
+</html>

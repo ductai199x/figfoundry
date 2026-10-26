@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fig Foundry</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/canvas.css">
+</head>
+<body>
+  <div class="picker">
+    <div class="picker-inner">
+      <div class="brand">
+        <div class="brand-mark">F</div>
+        <div class="brand-txt">
+          <h1>Fig Foundry</h1>
+          <p>Compose matplotlib figures on a free canvas from your data. Drag, snap, restyle. Export clean code.</p>
+        </div>
+      </div>
+
+      <div class="picker-create">
+        <a class="card create" id="newCanvas">
+          <div class="thumb thumb-blank"><span class="blank-glyph">+ New figure</span></div>
+          <div class="meta"><h3>New figure</h3><p>Start blank, load a dataset, then drag signals onto the canvas.</p></div>
+        </a>
+      </div>
+
+      <div class="picker-head">Your figures</div>
+      <div class="picker-grid" id="canvasGrid"></div>
+    </div>
+  </div>
+
+  <script>
+    const grid = document.getElementById("canvasGrid");
+    document.getElementById("newCanvas").onclick = (e) => { e.preventDefault(); newCanvas("blank"); };
+
+    async function newCanvas(mode) {
+      const r = await fetch("/api/canvases", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
+      const d = await r.json();
+      location.href = "/canvas?slug=" + d.slug;
+    }
+
+    async function load() {
+      const { canvases } = await (await fetch("/api/canvases")).json();
+      grid.innerHTML = "";
+      if (!canvases.length) {
+        grid.innerHTML = '<div class="picker-empty">No figures yet. Create one above &mdash; it will start as &ldquo;Untitled&rdquo;.</div>';
+        return;
+      }
+      for (const c of canvases) {
+        const card = document.createElement("div");
+        card.className = "card canvas-card";
+        card.innerHTML =
+          '<div class="thumb"></div>' +
+          '<div class="meta"><h3 class="cname"></h3><p>' + c.plots + ' plot' + (c.plots === 1 ? '' : 's') + '</p>' +
+          '<div class="card-actions"><button class="textbtn open">Open</button><button class="textbtn dup" title="Duplicate">&#10697; Duplicate</button><button class="textbtn del" title="Delete">&#128465; Delete</button></div></div>';
+        card.querySelector(".cname").textContent = c.name;
+        card.onclick = () => location.href = "/canvas?slug=" + c.slug;
+        card.querySelector(".open").onclick = (e) => { e.stopPropagation(); location.href = "/canvas?slug=" + c.slug; };
+        card.querySelector(".dup").onclick = async (e) => { e.stopPropagation(); await fetch("/api/canvases/" + c.slug + "/duplicate", { method: "POST" }); load(); };
+        card.querySelector(".del").onclick = async (e) => {
+          e.stopPropagation();
+          if (!confirm('Delete "' + c.name + '"? This cannot be undone.')) return;
+          await fetch("/api/canvases/" + c.slug, { method: "DELETE" });
+          load();
+        };
+        grid.appendChild(card);
+        fetch("/api/canvases/" + c.slug + "/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+          .then((r) => r.json())
+          .then((res) => { if (!res.img) return; const img = document.createElement("img"); img.src = "data:" + (res.mime || "image/png") + ";base64," + res.img; card.querySelector(".thumb").appendChild(img); })
+          .catch(() => {});
+      }
+    }
+    load();
+  </script>
+</body>
+</html>
