@@ -254,7 +254,18 @@ a.card { text-decoration: none; color: inherit; display: block; }
 .ctl { margin-bottom: 13px; }
 .ctl .ctl-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
 .ctl label { font-size: 12.5px; color: var(--muted); }
-.ctl .val { font-size: 12.5px; color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.ctl .val {
+  font-size: 12.5px; color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; font-family: inherit;
+  width: 68px; text-align: right;
+  background: transparent; border: 1px solid transparent; border-radius: 5px;
+  padding: 1px 6px; margin: -1px -6px;   /* padding + negative margin: the box appears on focus without shifting the number */
+  cursor: default; transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+.ctl .val:hover { background: var(--hover); cursor: text; }
+.ctl .val:focus {
+  background: var(--input-bg); border-color: var(--accent); cursor: text; outline: none;
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
 
 input[type="range"] {
   width: 100%; height: 4px; -webkit-appearance: none; appearance: none;

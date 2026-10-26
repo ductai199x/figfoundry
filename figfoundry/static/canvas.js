@@ -1063,11 +1063,38 @@ function hint(t) { const h = document.createElement("div"); h.className = "hint"
 function slider(label, path, val, min, max, step, afterChange) {
   const w = document.createElement("div"); w.className = "ctl";
   const head = document.createElement("div"); head.className = "ctl-head";
-  const lab = document.createElement("label"); lab.textContent = label; const vv = document.createElement("span"); vv.className = "val"; vv.textContent = fmt(val, step);
+  const lab = document.createElement("label"); lab.textContent = label;
+  // The value is a click-to-edit number field: plain text by default, an input
+  // box on focus. Type a value and commit with Enter or blur (click outside);
+  // Esc reverts. This is the only way to enter an exact number (the slider is
+  // for coarse adjustment), so it must stay in sync with the range input.
+  const vv = document.createElement("input"); vv.type = "text"; vv.className = "val num-in";
+  vv.inputMode = "decimal"; vv.spellcheck = false; vv.setAttribute("aria-label", label + " value");
   head.append(lab, vv); w.appendChild(head);
-  const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = val;
-  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parseFloat(inp.value)); vv.textContent = fmt(parseFloat(inp.value), step); scheduleDraft(); });
+  const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step;
+  let cur = val;
+  const paint = () => { if (document.activeElement !== vv) vv.value = fmt(cur, step); inp.value = cur; };
+  paint();
+  function live(v) {
+    if (isNaN(v)) return;
+    if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
+    cur = v; setPath(state.spec, path, v); paint(); scheduleDraft();
+  }
+  inp.addEventListener("input", () => live(parseFloat(inp.value)));
   inp.addEventListener("change", () => { commitSnapshot(); if (afterChange) afterChange(); commit(); });
+  function commitVal() {
+    const v = parseFloat(vv.value);
+    if (isNaN(v)) { paint(); return; }               // not a number: keep the last good value
+    const cv = Math.max(min, Math.min(max, v));      // clamp to the slider's range
+    if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
+    cur = cv; setPath(state.spec, path, cv); inp.value = cv; vv.value = fmt(cv, step);
+    commitSnapshot(); if (afterChange) afterChange(); commit();
+  }
+  vv.addEventListener("change", commitVal);          // commit on blur (click outside)
+  vv.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); vv.blur(); }   // commit on Enter
+    else if (e.key === "Escape") paint();                       // discard on Esc
+  });
   w.appendChild(inp); return w;
 }
 function text(label, path, val) {
@@ -1178,10 +1205,11 @@ const v3dPref = (k) => { try { return localStorage.getItem("figfoundry.invert3d.
 const v3dSetPref = (k, v) => { try { localStorage.setItem("figfoundry.invert3d." + k, v ? "1" : "0"); } catch (e) {} };
 function v3dVals() {
   if (!v3d) return;
-  const e = $("#v3eVal"), a = $("#v3aVal"), z = $("#v3dVal");
-  if (e) e.textContent = Math.round(v3d.elev) + "°";
-  if (a) a.textContent = Math.round(v3d.azim) + "°";
-  if (z) z.textContent = (Math.round(v3d.dist * 10) / 10);
+  // The value fields are editable inputs; don't clobber the one being typed into.
+  const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v; };
+  set("#v3eVal", Math.round(v3d.elev));
+  set("#v3aVal", Math.round(v3d.azim));
+  set("#v3dVal", Math.round(v3d.dist * 10) / 10);
 }
 
 async function openView3D(pid) {
@@ -1214,6 +1242,20 @@ function v3dWire() {
   $("#v3e").oninput = (e) => { v3d.elev = +e.target.value; v3dVals(); v3dRender(); };
   $("#v3a").oninput = (e) => { v3d.azim = +e.target.value; v3dVals(); v3dRender(); };
   $("#v3d").oninput = (e) => { v3d.dist = +e.target.value; v3dVals(); v3dRender(); };
+  // The value fields are click-to-edit: type an exact number, commit on Enter or
+  // blur, discard on Esc. Keeps the slider + 3-D preview in sync with the typed value.
+  const commit3 = (id, key, lo, hi, sl) => {
+    const el = $(id);
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); el.blur(); } else if (e.key === "Escape") v3dVals(); });
+    el.addEventListener("change", () => {
+      let v = parseFloat(el.value);
+      if (isNaN(v)) { v3dVals(); return; }
+      v = clamp(v, lo, hi); v3d[key] = v; $(sl).value = v; v3dVals(); v3dRender();
+    });
+  };
+  commit3("#v3eVal", "elev", -90, 90, "#v3e");
+  commit3("#v3aVal", "azim", -180, 180, "#v3a");
+  commit3("#v3dVal", "dist", 3, 22, "#v3d");
   $("#v3invR").onchange = (e) => { if (v3d) v3d.invertR = e.target.checked; v3dSetPref("rotate", e.target.checked); };
   $("#v3invZ").onchange = (e) => { if (v3d) v3d.invertZ = e.target.checked; v3dSetPref("zoom", e.target.checked); };
   const img = $("#view3dImg"); let drag = null;

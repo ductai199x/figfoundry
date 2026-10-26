@@ -111,17 +111,17 @@
         <div class="v3-row">
           <label class="v3-lab" for="v3e">Elevation</label>
           <input type="range" id="v3e" class="v3-range" min="-90" max="90" step="1">
-          <span class="v3-val" id="v3eVal">30&deg;</span>
+          <input type="text" class="v3-val num-in" id="v3eVal" value="30" inputmode="decimal" spellcheck="false" aria-label="Elevation value">
         </div>
         <div class="v3-row">
           <label class="v3-lab" for="v3a">Azimuth</label>
           <input type="range" id="v3a" class="v3-range" min="-180" max="180" step="1">
-          <span class="v3-val" id="v3aVal">-60&deg;</span>
+          <input type="text" class="v3-val num-in" id="v3aVal" value="-60" inputmode="decimal" spellcheck="false" aria-label="Azimuth value">
         </div>
         <div class="v3-row">
           <label class="v3-lab" for="v3d">Zoom</label>
           <input type="range" id="v3d" class="v3-range" min="3" max="22" step="0.5">
-          <span class="v3-val" id="v3dVal">10</span>
+          <input type="text" class="v3-val num-in" id="v3dVal" value="10" inputmode="decimal" spellcheck="false" aria-label="Zoom value">
         </div>
         <div class="v3-toggles">
           <label class="v3-check"><input type="checkbox" id="v3invR"> Invert rotate</label>
