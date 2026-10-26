@@ -13,12 +13,15 @@ import pytest
 
 from figfoundry import canvas
 
+# Low DPI for the WYSIWYG byte-comparison (holds at any DPI; see test_wysiwyg).
+WYSIWYG_DPI = 72
+
 
 def _md5(fig):
-    fig.set_dpi(canvas.PREVIEW_DPI)
+    fig.set_dpi(WYSIWYG_DPI)
     fig.canvas.draw()
     buf = io.BytesIO()
-    fig.canvas.print_figure(buf, dpi=canvas.PREVIEW_DPI)
+    fig.canvas.print_figure(buf, dpi=WYSIWYG_DPI)
     plt.close(fig)
     return hashlib.md5(buf.getvalue()).hexdigest()
 
