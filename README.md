@@ -131,7 +131,7 @@ security probes.
 - **Built for AI agents.** The editor is a JSON spec over a small HTTP API — load a dataset,
   set the plots and artists, render, export. An agent can build and revise a figure with no
   GUI (that is how our paper figures are made); you then fine-tune the result visually in the
-  browser.
+  browser. Full reference: [AGENTS.md](AGENTS.md).
 - **Composes on a free canvas.** Plots are explicit rectangles, not a fixed grid, so they
   go anywhere and at any size. Move and resize with snapping (on plots *and* on labels),
   drag a marquee to select a group, and move, nudge, rotate, copy/paste or delete them
