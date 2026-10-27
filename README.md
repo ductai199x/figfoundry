@@ -108,15 +108,17 @@ security probes.
 | | |
 |---|---|
 | Plot types, each verified preview-identical to its export | **23 of 23** ([tests](tests/test_plot_types.py)) |
-| Tests, passing on Linux and Windows, Python 3.10 and 3.12 | **152** ([CI](https://github.com/ductai199x/figfoundry/actions)) |
+| Tests, passing on Linux and Windows, Python 3.10 and 3.12 | **153** ([CI](https://github.com/ductai199x/figfoundry/actions)) |
 | Malicious pickle payloads the whitelist refuses to load | **18**, including `np.fromfile`, `np.load`, `__import__`, `eval`, `exec` ([tests](tests/test_data_app.py)) |
 | Separate renderers the export can drift from | **0** — the preview executes the export |
 
 ## What it does
 
 - **Composes on a free canvas.** Plots are explicit rectangles, not a fixed grid, so they
-  go anywhere and at any size. Move, resize with snapping, nudge with the arrow keys, and
-  multi-select (Shift+click) to move, nudge or delete a group at once.
+  go anywhere and at any size. Move and resize with snapping (on plots *and* on labels),
+  drag a marquee to select a group, and move, nudge, rotate, copy/paste or delete them
+  together. A full keyboard model: ⌘/Ctrl+C/V/X/D, ⌘/Ctrl+A select-all, ⌘/Ctrl+Z undo,
+  arrow keys, Delete — the same on macOS and Windows.
 - **Twenty-three plot types.** Line, step, scatter, grouped scatter (color-by-class), bar and
   horizontal bar, histogram, box plot, violin plot, 2-D histogram, hexbin, image, contour
   (filled and lines), pcolormesh, vector field, streamplot, decision boundary (a surface with
@@ -129,8 +131,12 @@ security probes.
   plot's series; a palette menu (Okabe–Ito, Bright, Viridis, Plasma, Cividis) is available
   through the API.
 - **Speaks LaTeX.** Labels, titles and text take mathtext, so `$x_0$` and `$\alpha$` render.
-- **Lays out for you.** Arrange in a grid, align and distribute a selection, set margins and
-  gaps, and sync axis ranges across every plot at once.
+- **Every value is type-able.** Any number on the canvas — width, position, margin, rotation —
+  is a click-to-edit field: click the number, type the exact value, Enter to commit. No more
+  hunting a slider to hit 0.005.
+- **Lays out for you.** Arrange in a grid, align and distribute (just a selection, or all
+  plots), set margins and gaps, sync axis ranges, and rotate any text, title or label by
+  dragging its handle or typing the degrees.
 - **Exports clean code.** The figure as a standalone <code>.py</code> that references the
   dataset, plus the rendered figure as PNG, SVG or PDF. The 3-D camera, the colors, the
   ticks — all of it is in the code.
@@ -206,7 +212,7 @@ Python 3.10 or newer. It runs wherever Python and a browser do.
 
 ```sh
 uv sync --extra dev
-uv run --extra dev pytest -q          # 152 tests
+uv run --extra dev pytest -q          # 153 tests
 uv run --with ruff ruff check .       # lint
 uv run figfoundry serve               # the app
 ```
