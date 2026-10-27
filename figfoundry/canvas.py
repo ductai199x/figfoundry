@@ -647,6 +647,13 @@ def hotspots_from_fig(fig, spec):
         add(f"plot:{pid}", ax)
         if (p.get("title") or {}).get("visible"):
             add(f"title:{pid}", ax.title)
+        # Per-plot TEXT artists: ax.texts holds exactly these, in spec order (tick
+        # labels and the title are not in ax.texts), so they get canvas overlays
+        # (draggable / rotatable / snappable) keyed by their spec index j.
+        titer = iter(ax.texts)
+        for j, art in enumerate(p.get("artists") or []):
+            if isinstance(art, dict) and art.get("type") == "text":
+                add(f"artist:{pid}:{j}", next(titer, None))
     # per-plot artists / overlaid lines are selected from the Layers list (robust),
     # not by canvas hit-testing (ax.lines is polluted by extra lines + error bars).
     # fig.texts also holds the suptitle (Figure.suptitle appends to it), so exclude it

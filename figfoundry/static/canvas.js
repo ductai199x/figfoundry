@@ -86,14 +86,22 @@ async function doRender(draft) {
   if (renderInFlight) { renderPending = true; renderPendingDraft = draft; return; }
   renderInFlight = true;
   const seq = ++renderSeq;
+  setRenderBusy(true);
   try {
     const r = await post(`/api/canvases/${state.slug}/render`, { spec: state.spec, draft });
     if (seq === renderSeq) { state.render = r; applyRender(); }
   } catch (e) { if (seq === renderSeq) toast("Render failed: " + e.message, true); }
   finally {
     renderInFlight = false;
+    setRenderBusy(false);
     if (renderPending) { const d = renderPendingDraft; renderPending = false; doRender(d); }
   }
+}
+// A subtle "Rendering…" pill in the stage corner while a render is in flight.
+function setRenderBusy(b) {
+  let el = document.getElementById("renderBusy");
+  if (b) { if (!el) { el = document.createElement("div"); el.id = "renderBusy"; el.className = "render-busy"; el.textContent = "Rendering…"; stage.appendChild(el); } el.style.display = "block"; }
+  else if (el) el.style.display = "none";
 }
 // fast low-res render during interaction; full-res when things settle
 function scheduleDraft() { clearTimeout(fullTimer); fullTimer = null; if (draftTimer) return; draftTimer = setTimeout(() => { draftTimer = null; doRender(true); }, 50); }
@@ -260,6 +268,38 @@ function refreshSelection() {
   overlay.querySelectorAll(".plotbox").forEach((d) => d.classList.toggle("selected", state.selection.has("plot:" + d.dataset.pid)));
   overlay.querySelectorAll(".mov").forEach((d) => d.classList.toggle("selected", state.selection.has(d.dataset.id)));
   document.querySelectorAll(".layer").forEach((l) => l.classList.toggle("active", l.dataset.id && state.selection.has(l.dataset.id)));
+  drawGroupBox();
+}
+// Dashed outline around a multi-selection so the group's extent is visible.
+function drawGroupBox() {
+  let gb = document.getElementById("groupBox");
+  if (state.selection.size < 2) { if (gb) gb.remove(); return; }
+  const r = state.render; if (!r) return;
+  let l = 1, b = 1, rr = 0, tt = 0, any = false;
+  const absorb = (box) => { if (!box) return; any = true; l = Math.min(l, box[0]); b = Math.min(b, box[1]); rr = Math.max(rr, box[0] + box[2]); tt = Math.max(tt, box[1] + box[3]); };
+  for (const id of state.selection) {
+    if (id.startsWith("plot:")) { const p = state.spec.plots.find((x) => x.id === id.slice(5)); if (p) absorb(p.rect); }
+    else { const h = r.hotspots.find((x) => x.id === id); if (h) absorb([h.x / r.img_w, 1 - (h.top + h.h) / r.img_h, h.w / r.img_w, h.h / r.img_h]); }
+  }
+  if (!any) return;
+  if (!gb) { gb = document.createElement("div"); gb.id = "groupBox"; overlay.appendChild(gb); }
+  gb.style.left = (l * 100) + "%"; gb.style.top = ((1 - tt) * 100) + "%";
+  gb.style.width = ((rr - l) * 100) + "%"; gb.style.height = ((tt - b) * 100) + "%";
+  gb.style.display = "block";
+}
+// Rubber-band select: everything whose bbox intersects the drag rect (in figure
+// fractions). Shift adds to the current selection.
+function marqueeSelect(x0, y0, x1, y1, base) {
+  const a = toFig(x0, y0), b = toFig(x1, y1);
+  const L = Math.min(a.fx, b.fx), R = Math.max(a.fx, b.fx);
+  const T = 1 - Math.min(a.fyTop, b.fyTop), B = 1 - Math.max(a.fyTop, b.fyTop);
+  const hit = (box) => box[0] < R && box[0] + box[2] > L && box[1] < T && box[1] + box[3] > B;
+  const sel = new Set(base);
+  for (const p of state.spec.plots) if (hit(p.rect)) sel.add("plot:" + p.id);
+  const r = state.render;
+  if (r) for (const h of r.hotspots) { if (h.id.startsWith("plot:")) continue; if (hit([h.x / r.img_w, 1 - (h.top + h.h) / r.img_h, h.w / r.img_w, h.h / r.img_h])) sel.add(h.id); }
+  state.selection = sel; state.selected = sel.size ? [...sel].pop() : null;
+  refreshSelection(); buildInspector();
 }
 
 /* ---------------- move / resize / drag ---------------- */
@@ -271,7 +311,7 @@ function makeMovable(el, id, mode) {
     const shift = e.shiftKey;
     const handle = (e.target.dataset && e.target.dataset.h) || null;
     const startF = toFig(e.clientX, e.clientY);
-    let moved = false, onMove, onUp, sx = 0, sy = 0, lastDxF = 0, lastDyF = 0;
+    let moved = false, onMove, onUp, sx = 0, sy = 0, lastDxF = 0, lastDyF = 0, isGroup = false, groupDivs = [el];
     if (mode === "box") {
       const p = state.spec.plots.find((x) => x.id === id.slice(5));
       const rect0 = p.rect.slice();
@@ -284,6 +324,7 @@ function makeMovable(el, id, mode) {
         const F = toFig(ev.clientX, ev.clientY);
         const dxF = F.fx - startF.fx, dyBF = startF.fyTop - F.fyTop;
         if (!moved && Math.abs(dxF) * r.img_w * state.zoom < 3 && Math.abs(dyBF) * r.img_h * state.zoom < 3) return;  // sub-3px = a click, not a drag
+        if (!moved) pushHist();  // capture pre-drag state so a move/resize is undoable
         moved = true;
         if (handle === null) {
           const rect = rect0.slice(); rect[0] += dxF; rect[1] += dyBF;
@@ -313,9 +354,12 @@ function makeMovable(el, id, mode) {
       const hs0 = r0 && r0.hotspots.find((h) => h.id === id);
       const startBox = hs0 ? [hs0.x / r0.img_w, 1 - (hs0.top + hs0.h) / r0.img_h, hs0.w / r0.img_w, hs0.h / r0.img_h] : null;
       const others = startBox ? snapModel(id) : [];
+      isGroup = state.selection.size > 1 && state.selection.has(id);
+      groupDivs = isGroup ? [...overlay.querySelectorAll(".mov")].filter((d) => state.selection.has(d.dataset.id)) : [el];
       onMove = (ev) => {
         const dx = ev.clientX - sx, dy = ev.clientY - sy;
         if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;  // sub-3px = a click, not a drag
+        if (!moved) pushHist();  // capture pre-drag state so a move is undoable
         moved = true;
         let dxF = dx / imgWpx, dyF = -dy / imgHpx;
         if (startBox) {
@@ -323,8 +367,9 @@ function makeMovable(el, id, mode) {
           drawGuides(snapBoxPos(box, others, r0.img_w, r0.img_h));
           lastDxF = box[0] - startBox[0]; lastDyF = box[1] - startBox[1];  // the snapped delta
         } else { lastDxF = dxF; lastDyF = dyF; }
-        // el sits inside the zoomed stageInner, so its local px are screen px / zoom
-        el.style.transform = `translate(${lastDxF * imgWpx / state.zoom}px, ${-lastDyF * imgHpx / state.zoom}px)`;
+        // el sits inside the zoomed stageInner, so its local px are screen px / zoom;
+        // a group drag moves every selected label by the same (snapped) delta.
+        groupDivs.forEach((d) => { d.style.transform = `translate(${lastDxF * imgWpx / state.zoom}px, ${-lastDyF * imgHpx / state.zoom}px)`; });
         scheduleDraft();
       };
     }
@@ -333,9 +378,9 @@ function makeMovable(el, id, mode) {
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onUp);
       drawGuides([]);
-      el.style.transform = "";
+      groupDivs.forEach((d) => { d.style.transform = ""; });
       if (!moved) { select(id, shift); return; }
-      if (mode !== "box") commitArtDrag(id, lastDxF, lastDyF);
+      if (mode !== "box") { const ids = isGroup ? [...state.selection] : [id]; for (const eid of ids) commitArtDrag(eid, lastDxF, lastDyF); }
       commit();
     };
     document.addEventListener("pointermove", onMove);
@@ -449,7 +494,16 @@ function nudgeOne(id, dx, dy) {
   if (kind === "plot") { const p = state.spec.plots.find((x) => x.id === pid); if (p) { p.rect[0] = clamp(r4(p.rect[0] + dx), 0, 1); p.rect[1] = clamp(r4(p.rect[1] + dy), 0, 1); } }
   else if (kind === "title") { const p = state.spec.plots.find((x) => x.id === pid); const t = p && p.title; if (t) { t.x = r4(clamp(t.x + dx / p.rect[2], -0.6, 1.6)); t.y = r4(clamp(t.y + dy / p.rect[3], -0.6, 1.6)); t.visible = true; } }
   else if (kind === "figartist") { const fa = state.spec.figure_artists[+pid]; if (fa) { if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dx, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dy, -0.2, 1.2)); } else { fa.x = r4(clamp((fa.x || 0) + dx, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dy, -0.1, 1.1)); } } }
-  else if (kind === "artist") { const p = state.spec.plots.find((x) => x.id === pid); const a = p && p.artists[j]; if (a) { if (a.type === "text" && a.axes_frac) { a.x = r4(clamp(a.x + dx / p.rect[2], -0.6, 1.6)); a.y = r4(clamp(a.y + dy / p.rect[3], -0.6, 1.6)); } else if (a.type === "vline") a.x = r4(a.x + dx * 8); else if (a.type === "hline") a.y = r4(a.y + dy * 8); else if (a.type === "circle" || a.type === "ellipse") { a.x = r4(a.x + dx * 8); a.y = r4(a.y + dy * 8); } } }
+  else if (kind === "artist") { const p = state.spec.plots.find((x) => x.id === pid); const a = p && p.artists[j]; if (a) {
+    if (a.type === "text" && a.axes_frac) { a.x = r4(clamp(a.x + dx / p.rect[2], -0.6, 1.6)); a.y = r4(clamp(a.y + dy / p.rect[3], -0.6, 1.6)); }
+    else if (a.type === "vline") a.x = r4(a.x + dx * 8);
+    else if (a.type === "hline") a.y = r4(a.y + dy * 8);
+    else if (a.type === "circle" || a.type === "ellipse") { a.x = r4(a.x + dx * 8); a.y = r4(a.y + dy * 8); }
+    else if (a.type === "box") { a.x0 = r4(clamp(a.x0 + dx, -0.2, 1.2)); a.y0 = r4(clamp(a.y0 + dy, -0.2, 1.2)); }
+    else if (a.type === "vspan") { a.x0 = r4(a.x0 + dx * 8); a.x1 = r4(a.x1 + dx * 8); }
+    else if (a.type === "annotation") { a.xytext = [r4(a.xytext[0] + dx), r4(a.xytext[1] + dy)]; }
+    else if (a.type === "arrow") { a.x0 = r4(a.x0 + dx * 8); a.y0 = r4(a.y0 + dy * 8); a.x1 = r4(a.x1 + dx * 8); a.y1 = r4(a.y1 + dy * 8); }
+  } }
 }
 
 /* ---------------- signal drag -> create plot ---------------- */
@@ -816,7 +870,13 @@ function buildFigureElementsSection() {
 }
 
 function layoutAll(op, param) {
-  const plots = state.spec.plots; if (!plots.length) return;
+  // Act on the selected plots when a multi-selection is active, else all plots.
+  let plots = state.spec.plots;
+  if (state.selection.size > 1) {
+    const selIds = new Set([...state.selection].filter((i) => i.startsWith("plot:")).map((i) => i.slice(5)));
+    if (selIds.size > 1) plots = plots.filter((p) => selIds.has(p.id));
+  }
+  if (!plots.length) return;
   const L = state.spec.layout || { margin: 0.05, gap: 0.04 };
   const rects = plots.map((p) => p.rect);
   pushHist();
@@ -903,7 +963,7 @@ function plotTypeSelect(pid) {
   const p = state.spec.plots[idx(pid)];
   const w = document.createElement("div"); w.className = "ctl";
   const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = "Plot type"; head.appendChild(lab); w.appendChild(head);
-  const sel = document.createElement("select"); sel.className = "ctl-sel";
+  const sel = document.createElement("select"); sel.className = "ctl-sel"; sel.setAttribute("aria-label", "Plot type");
   const groups = {};
   for (const [k, v] of Object.entries(PLOT_TYPES)) (groups[v.group] = groups[v.group] || []).push([k, v.label]);
   for (const gname of Object.keys(groups)) {
@@ -950,6 +1010,8 @@ function buildPlotInspector(body, pid) {
   body.appendChild(ctlHead("Axes"));
   body.appendChild(ticksText("X ticks (blank = auto)", ["plots", idx(pid), "axes", "xticks"], p.axes.xticks));
   body.appendChild(ticksText("Y ticks (blank = auto)", ["plots", idx(pid), "axes", "yticks"], p.axes.yticks));
+  body.appendChild(labelsText("X tick labels (blank = auto)", ["plots", idx(pid), "axes", "xticklabels"], p.axes.xticklabels));
+  body.appendChild(labelsText("Y tick labels (blank = auto)", ["plots", idx(pid), "axes", "yticklabels"], p.axes.yticklabels));
   body.appendChild(text("X label", ["plots", idx(pid), "axes", "xlabel"], p.axes.xlabel, true));
   body.appendChild(check("Show X label", ["plots", idx(pid), "axes", "xlabel_visible"], p.axes.xlabel_visible));
   body.appendChild(text("Y label", ["plots", idx(pid), "axes", "ylabel"], p.axes.ylabel, true));
@@ -1047,7 +1109,23 @@ function buildArtistInspector(body, pid, j) {
     body.appendChild(check("Filled", P("fill"), !!a.fill));
     body.appendChild(color("Color", P("color"), a.color || "#000"));
     body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1));
-    body.appendChild(hint("Default 3-point triangle; edit points in the spec for custom shapes."));
+    const pts = (a.points && a.points.length) ? a.points.slice() : [[4, 0], [6, 0], [5, 1]];
+    body.appendChild(ctlHead("Points (data coords)"));
+    const plist = document.createElement("div"); plist.className = "art-list";
+    pts.forEach((pt, vi) => {
+      const r2 = document.createElement("div"); r2.className = "num-row";
+      const nx = document.createElement("input"), ny = document.createElement("input"), sep = document.createElement("span");
+      sep.className = "sep"; sep.textContent = ","; nx.type = ny.type = "text"; nx.value = pt[0]; ny.value = pt[1];
+      const up = () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); a.points = pts.map((q, i) => (i === vi ? [parseFloat(nx.value) || 0, parseFloat(ny.value) || 0] : q)); scheduleDraft(); };
+      nx.addEventListener("input", up); ny.addEventListener("input", up);
+      nx.addEventListener("change", () => { commitSnapshot(); commit(); }); ny.addEventListener("change", () => { commitSnapshot(); commit(); });
+      const rmv = document.createElement("span"); rmv.textContent = "×"; rmv.style.cssText = "cursor:pointer;color:var(--faint);padding:0 6px";
+      rmv.onclick = () => { pushHist(); pts.splice(vi, 1); a.points = pts.slice(); select("artist:" + pid + ":" + j); commit(); };
+      r2.append(nx, sep, ny, rmv); plist.appendChild(r2);
+    });
+    const addPt = document.createElement("button"); addPt.className = "pill"; addPt.textContent = "+ Point";
+    addPt.onclick = () => { pushHist(); pts.push([5, 5]); a.points = pts.slice(); select("artist:" + pid + ":" + j); commit(); };
+    body.appendChild(plist); body.appendChild(addPt);
   }
   else if (a.type === "arrow") {
     body.appendChild(slider("From X", P("x0"), a.x0, -10, 20, 0.2, null, true));
@@ -1085,17 +1163,20 @@ function buildFigartistInspector(body, j) {
       const tin = document.createElement("input"); tin.type = "text"; tin.value = lb; tin.style.flex = "2";
       tin.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); fa.labels[i] = tin.value; scheduleDraft(); });
       tin.addEventListener("change", () => { commitSnapshot(); commit(); });
-      const mk = document.createElement("select"); mk.className = "ctl-sel"; mk.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
+      const mk = document.createElement("select"); mk.className = "ctl-sel"; mk.setAttribute("aria-label", "Entry marker"); mk.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
       for (const [v, l] of [["", "— line"], ["o", "o dot"], ["^", "^ tri"], ["s", "s sq"], ["D", "D dia"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; mk.appendChild(o); }
       mk.value = (fa.handles[i] && fa.handles[i].marker) || "";
       mk.addEventListener("change", () => { pushHist(); fa.handles = fa.handles || []; fa.handles[i] = fa.handles[i] || {}; fa.handles[i].marker = mk.value; fa.handles[i].ms = mk.value ? 3 : 0; commit(); });
-      const ls = document.createElement("select"); ls.className = "ctl-sel"; ls.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
+      const ls = document.createElement("select"); ls.className = "ctl-sel"; ls.setAttribute("aria-label", "Entry line style"); ls.style.cssText = "width:auto;flex:0 0 auto;padding:4px 6px";
       for (const [v, l] of [["-", "solid"], ["dotted", "dotted"], ["dashed", "dashed"]]) { const o = document.createElement("option"); o.value = v; o.textContent = l; ls.appendChild(o); }
       ls.value = (fa.handles[i] && fa.handles[i].ls) || "-";
       ls.addEventListener("change", () => { pushHist(); fa.handles = fa.handles || []; fa.handles[i] = fa.handles[i] || {}; fa.handles[i].ls = ls.value; commit(); });
+      const ci = document.createElement("input"); ci.type = "color"; ci.title = "Entry color"; const _hc = (fa.handles[i] && fa.handles[i].color) || ""; ci.value = /^#[0-9a-f]{6}$/i.test(_hc) ? _hc : "#b03a2e"; ci.style.cssText = "width:26px;height:22px;padding:1px;border:1px solid var(--line);border-radius:5px;background:var(--input-bg);flex:0 0 auto";
+      ci.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); fa.handles[i] = fa.handles[i] || {}; fa.handles[i].color = ci.value; scheduleDraft(); });
+      ci.addEventListener("change", () => { commitSnapshot(); commit(); });
       const rm = document.createElement("span"); rm.textContent = "×"; rm.style.cssText = "cursor:pointer;color:var(--faint);padding:0 6px;font-size:15px";
       rm.onclick = () => { pushHist(); fa.labels.splice(i, 1); (fa.handles || []).splice(i, 1); select("figartist:" + j); commit(); };
-      row.append(tin, mk, ls, rm); elist.appendChild(row);
+      row.append(tin, ci, mk, ls, rm); elist.appendChild(row);
     });
     body.appendChild(elist);
     const addE = document.createElement("button"); addE.className = "pill"; addE.textContent = "+ Entry";
@@ -1115,7 +1196,7 @@ function buildFigartistInspector(body, j) {
 
 function errorbarSelect(p) {
   const w = document.createElement("div"); w.className = "ctl"; w.appendChild(ctlHead("Error bars (±)"));
-  const sel = document.createElement("select"); sel.className = "ctl-sel";
+  const sel = document.createElement("select"); sel.className = "ctl-sel"; sel.setAttribute("aria-label", "Error bars");
   const none = document.createElement("option"); none.value = ""; none.textContent = "(none)"; sel.appendChild(none);
   for (const s of state.signals) { const o = document.createElement("option"); o.value = s.ref; o.textContent = s.label; sel.appendChild(o); }
   sel.value = p.data.errorbar ? p.data.errorbar.ref : "";
@@ -1190,7 +1271,7 @@ function slider(label, path, val, min, max, step, afterChange, noClamp) {
   const vv = document.createElement("input"); vv.type = "text"; vv.className = "val num-in";
   vv.inputMode = "decimal"; vv.spellcheck = false; vv.setAttribute("aria-label", label + " value");
   head.append(lab, vv); w.appendChild(head);
-  const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step;
+  const inp = document.createElement("input"); inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.setAttribute("aria-label", label + " (slider)");
   let cur = val;
   const paint = () => { if (document.activeElement !== vv) vv.value = fmt(cur, step); inp.value = cur; };
   paint();
@@ -1231,7 +1312,7 @@ function text(label, path, val, multiline) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const inp = document.createElement(multiline ? "textarea" : "input");
   if (multiline) { inp.rows = 2; inp.className = "ctl-area"; } else { inp.type = "text"; }
-  inp.value = val == null ? "" : val; inp.placeholder = "Text… (LaTeX like $x_0$ works)"; inp.spellcheck = false;
+  inp.value = val == null ? "" : val; inp.placeholder = "Text… (LaTeX like $x_0$ works)"; inp.spellcheck = false; inp.setAttribute("aria-label", label);
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); scheduleDraft(); });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   wireEscRevert(inp);
@@ -1241,6 +1322,16 @@ function ticksText(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : ""; inp.placeholder = "e.g. 0, 5, 10";
   const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
+  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
+  inp.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(inp);
+  w.appendChild(inp); return w;
+}
+// Comma-separated STRING list (custom tick labels; LaTeX allowed, blank = none).
+function labelsText(label, path, val) {
+  const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
+  const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : ""; inp.placeholder = "e.g. a, b, c (LaTeX ok)"; inp.spellcheck = false;
+  const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => s.trim()) : null; };
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   wireEscRevert(inp);
@@ -1260,10 +1351,15 @@ function num2(label, path, val) {
 function color(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
   const row = document.createElement("div"); row.className = "color-row";
-  const inp = document.createElement("input"); inp.type = "color"; inp.value = val || "#000000";
-  const hex = document.createElement("span"); hex.className = "color-hex"; hex.textContent = val || "#000000";
-  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, inp.value); hex.textContent = inp.value; scheduleDraft(); });
+  const isHex = (v) => /^#[0-9a-f]{6}$/i.test(v || "");
+  const inp = document.createElement("input"); inp.type = "color"; inp.value = isHex(val) ? val : "#000000"; inp.setAttribute("aria-label", label + " (color picker)");
+  const hex = document.createElement("input"); hex.type = "text"; hex.className = "color-hex"; hex.value = val || "#000000"; hex.spellcheck = false; hex.placeholder = "#rrggbb or tab:red"; hex.setAttribute("aria-label", label + " (hex or name)");
+  const apply = (v) => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, v); if (isHex(v)) inp.value = v; scheduleDraft(); };
+  inp.addEventListener("input", () => { apply(inp.value); hex.value = inp.value; });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
+  hex.addEventListener("input", () => { apply(hex.value); });
+  hex.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(hex);
   row.append(inp, hex); w.appendChild(row); return w;
 }
 function check(label, path, val) {
@@ -1280,14 +1376,14 @@ function checkInline(label, path, val) {
 }
 function selControl(label, path, val, options) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
-  const sel = document.createElement("select"); sel.className = "ctl-sel";
+  const sel = document.createElement("select"); sel.className = "ctl-sel"; sel.setAttribute("aria-label", label);
   for (const [v, l] of options) { const o = document.createElement("option"); o.value = v; o.textContent = l; if (v === val) o.selected = true; sel.appendChild(o); }
   sel.addEventListener("change", () => { pushHist(); setPath(state.spec, path, sel.value); commit(); });
   w.appendChild(sel); return w;
 }
 function sigSelect(label, path, val, allowNone) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
-  const sel = document.createElement("select"); sel.className = "ctl-sel";
+  const sel = document.createElement("select"); sel.className = "ctl-sel"; sel.setAttribute("aria-label", label);
   if (allowNone) { const o = document.createElement("option"); o.value = ""; o.textContent = "(none)"; if (!val) o.selected = true; sel.appendChild(o); }
   for (const s of state.signals) { const o = document.createElement("option"); o.value = s.ref; o.textContent = s.label + (s.ndim > 1 ? " (" + s.shape.join("×") + ")" : ""); if (s.ref === val) o.selected = true; sel.appendChild(o); }
   sel.addEventListener("change", () => { pushHist(); setPath(state.spec, path, sel.value || null); commit(); });
@@ -1330,7 +1426,7 @@ function fitZoom() {
 async function openExport() {
   const { code } = await get(`/api/canvases/${state.slug}/code`);
   $("#codeBody").textContent = code; $("#codePath").textContent = (state.name || "canvas") + ".py";
-  $("#exportModal").classList.remove("hidden");
+  openModal($("#exportModal"));
 }
 
 /* ---------------- 3-D view finder (double-click a 3-D plot) ---------------- */
@@ -1358,7 +1454,7 @@ async function openView3D(pid) {
   $("#v3e").value = v3d.elev; $("#v3a").value = v3d.azim; $("#v3d").value = v3d.dist;
   $("#v3invR").checked = v3d.invertR; $("#v3invZ").checked = v3d.invertZ;
   v3dVals();
-  $("#view3dModal").classList.remove("hidden");
+  openModal($("#view3dModal"));
   v3dRender();
 }
 function v3dRender() {
@@ -1402,10 +1498,10 @@ function v3dWire() {
     pushHist();
     const p = state.spec.plots.find((x) => x.id === v3d.pid);
     p.style.elev = v3d.elev; p.style.azim = v3d.azim; p.style.dist = v3d.dist;
-    $("#view3dModal").classList.add("hidden");
+    closeModal($("#view3dModal"));
     commit();
   };
-  const close = () => $("#view3dModal").classList.add("hidden");
+  const close = () => closeModal($("#view3dModal"));
   $("#v3dCancel").onclick = close; $("#view3dClose").onclick = close;
   $("#view3dModal").onclick = (e) => { if (e.target === $("#view3dModal")) close(); };
 }
@@ -1413,6 +1509,34 @@ function v3dWire() {
 /* ---------------- toast ---------------- */
 let toastTimer;
 function toast(msg, isErr) { const t = $("#toast"); t.textContent = msg; t.style.background = isErr ? "var(--danger)" : "var(--toast-bg)"; t.classList.remove("hidden"); requestAnimationFrame(() => t.classList.add("show")); clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.classList.add("hidden"), 200); }, isErr ? 4000 : 2200); }
+
+/* ---------------- modal focus management ----------------
+   Move focus into the dialog on open, trap Tab within it, and restore focus to
+   the trigger on close (a11y: aria-modal="true" without a trap lets Tab escape). */
+let modalLastFocus = null;
+function _focusables(el) { return [...el.querySelectorAll("button, input, select, textarea")].filter((n) => !n.disabled && n.offsetParent !== null); }
+function openModal(el) { modalLastFocus = document.activeElement; el.classList.remove("hidden"); el._onTrap = (e) => { if (e.key !== "Tab") return; const f = _focusables(el); if (!f.length) return; const first = f[0], last = f[f.length - 1]; if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); } }; el.addEventListener("keydown", el._onTrap); const f = _focusables(el); if (f.length) f[0].focus(); }
+function closeModal(el) { el.classList.add("hidden"); if (el._onTrap) { el.removeEventListener("keydown", el._onTrap); el._onTrap = null; } if (modalLastFocus && modalLastFocus.focus) { try { modalLastFocus.focus(); } catch (_) {} } }
+// Styled confirm (replaces the native window.confirm) — resolves true/false.
+function confirmDialog(message, okLabel) {
+  return new Promise((resolve) => {
+    let box = document.getElementById("confirmModal");
+    if (!box) {
+      box = document.createElement("div"); box.id = "confirmModal"; box.className = "modal hidden"; box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
+      box.innerHTML = `<div class="modal-card"><h3>Confirm</h3><p class="confirm-msg"></p><div class="modal-actions modal-actions-right"><button class="textbtn confirm-cancel">Cancel</button><button class="primary confirm-ok"></button></div></div>`;
+      document.body.appendChild(box);
+    }
+    box.querySelector(".confirm-msg").textContent = message;
+    const ok = box.querySelector(".confirm-ok"), cancel = box.querySelector(".confirm-cancel");
+    ok.textContent = okLabel || "Confirm";
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; box.classList.add("hidden"); box.onclick = null; ok.onclick = cancel.onclick = null; resolve(v); };
+    ok.onclick = () => done(true);
+    cancel.onclick = () => done(false);
+    box.onclick = (e) => { if (e.target === box) done(false); };
+    openModal(box);
+  });
+}
 
 /* ---------------- boot ---------------- */
 async function boot() {
@@ -1424,6 +1548,7 @@ async function boot() {
     doc = await get(`/api/canvases/${slug}`);
   } catch (e) { return showLoadError(e); }
   state.name = doc.name;
+  document.title = "Fig Foundry — " + state.name;
   state.spec = doc.spec;
   state.dataset = doc.spec.dataset || null;
   let sigRes;
@@ -1452,10 +1577,26 @@ function wireChrome() {
   $("#undoBtn").title = "Undo (" + MOD + "+Z)";
   $("#redoBtn").title = "Redo (" + MOD + "Shift+Z)";
   $("#themeBtn").onclick = cycleTheme;
+  // Help / shortcuts modal
+  const helpRows = [
+    [MOD + "+Z", "Undo"], [MOD + "+Shift+Z", "Redo"],
+    [MOD + "+A", "Select all"], [MOD + "+C / V / X", "Copy / paste / cut"], [MOD + "+D", "Duplicate"],
+    ["Delete / Backspace", "Delete selection"], ["Esc", "Deselect / close dialog"],
+    ["Arrow keys", "Nudge (Shift = bigger)"], ["Shift+click", "Add to / remove from selection"],
+    ["Drag empty space", "Marquee select"], ["Space+drag / middle-drag", "Pan"],
+    ["Scroll", "Zoom"], ["Double-click a 3-D plot", "Open the viewfinder"],
+  ];
+  $("#helpList").innerHTML = helpRows.map(([k, d]) => `<span class="k">${k}</span><span class="d">${d}</span>`).join("");
+  const helpModal = $("#helpModal");
+  $("#helpBtn").onclick = () => openModal(helpModal);
+  $("#helpClose").onclick = () => closeModal(helpModal);
+  $("#helpOk").onclick = () => closeModal(helpModal);
+  helpModal.onclick = (e) => { if (e.target === helpModal) closeModal(helpModal); };
   $("#backBtn").onclick = () => { location.href = "/"; };
   $("#figName").addEventListener("change", async () => {
     state.name = $("#figName").value.trim() || "Untitled";
     $("#figName").value = state.name;
+    document.title = "Fig Foundry — " + state.name;
     await api(`/api/canvases/${state.slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: state.name }) });
     toast("Renamed to " + state.name);
   });
@@ -1465,7 +1606,7 @@ function wireChrome() {
     location.href = "/canvas?slug=" + r.slug;
   };
   $("#deleteBtn").onclick = async () => {
-    if (!confirm('Delete "' + state.name + '"? This cannot be undone.')) return;
+    if (!(await confirmDialog('Delete "' + state.name + '"? This cannot be undone.', "Delete"))) return;
     await api(`/api/canvases/${state.slug}`, { method: "DELETE" });
     location.href = "/";
   };
@@ -1474,33 +1615,59 @@ function wireChrome() {
   $("#addPlotBtn").onclick = () => { pushHist(); const sg = state.signals.filter((s) => s.ndim === 1); const x = sg.find((s) => s.name === "x") || sg[0]; const y = sg.find((s) => s !== x) || sg[0]; const p = _blankPlot(nextPlotId(), [0.35, 0.35, 0.3, 0.3], x ? x.ref : null, y ? y.ref : null); p.type = "line"; state.spec.plots.push(p); select("plot:" + p.id); commit(); };
   $("#loadDataBtn").onclick = (e) => { e.stopPropagation(); loadDataMenu(e.clientX, e.clientY); };
   $("#exportBtn").onclick = openExport;
-  $("#modalClose").onclick = () => $("#exportModal").classList.add("hidden");
-  $("#exportModal").onclick = (e) => { if (e.target === $("#exportModal")) $("#exportModal").classList.add("hidden"); };
+  $("#modalClose").onclick = () => closeModal($("#exportModal"));
+  $("#exportModal").onclick = (e) => { if (e.target === $("#exportModal")) closeModal($("#exportModal")); };
   $("#copyCode").onclick = async () => { try { await navigator.clipboard.writeText($("#codeBody").textContent); toast("Code copied"); } catch (e) { toast("Copy failed", true); } };
   $("#downloadCode").onclick = () => { location.href = `/api/canvases/${state.slug}/download`; toast("Downloading " + (state.name || "canvas") + ".py"); };
   $("#dlPng").onclick = () => { location.href = `/api/canvases/${state.slug}/figure?format=png`; };
   $("#dlSvg").onclick = () => { location.href = `/api/canvases/${state.slug}/figure?format=svg`; };
   $("#dlPdf").onclick = () => { location.href = `/api/canvases/${state.slug}/figure?format=pdf`; };
-  let pan = null, spaceDown = false;
+  let pan = null, spaceDown = false, marquee = null, marqueeEl = null;
   stage.addEventListener("wheel", (e) => { if (!state.render) return; e.preventDefault(); setZoom(state.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12), e.clientX, e.clientY); }, { passive: false });
   stage.addEventListener("pointerdown", (e) => {
     const empty = e.target === stage || e.target === stageInner || e.target === figImg || e.target === overlay;
-    if (e.button === 1 || (e.button === 0 && (empty || spaceDown))) {
+    if (e.button === 1 || (e.button === 0 && spaceDown)) {
       e.preventDefault();
       stage.setPointerCapture(e.pointerId);  // pointerup is delivered even if released outside the window
-      pan = { x: e.clientX, y: e.clientY, px: state.pan.x, py: state.pan.y, clickEmpty: e.button === 0 && empty && !spaceDown };
+      pan = { x: e.clientX, y: e.clientY, px: state.pan.x, py: state.pan.y };
+    } else if (e.button === 0 && empty && !spaceDown) {
+      e.preventDefault();
+      stage.setPointerCapture(e.pointerId);
+      marquee = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, base: e.shiftKey ? new Set(state.selection) : new Set() };
+      if (!marqueeEl) { marqueeEl = document.createElement("div"); marqueeEl.className = "marquee"; stage.appendChild(marqueeEl); }
+      marqueeEl.style.display = "block";
     }
   });
-  window.addEventListener("pointermove", (e) => { if (!pan) return; state.pan.x = pan.px + (e.clientX - pan.x); state.pan.y = pan.py + (e.clientY - pan.y); applyTransform(); });
-  window.addEventListener("pointerup", (e) => { if (pan && pan.clickEmpty && Math.abs(e.clientX - pan.x) < 3 && Math.abs(e.clientY - pan.y) < 3) select(null); pan = null; });
-  window.addEventListener("pointercancel", () => { pan = null; });
+  window.addEventListener("pointermove", (e) => {
+    if (pan) { state.pan.x = pan.px + (e.clientX - pan.x); state.pan.y = pan.py + (e.clientY - pan.y); applyTransform(); }
+    if (marquee) {
+      marquee.x1 = e.clientX; marquee.y1 = e.clientY;
+      const sr = stage.getBoundingClientRect();
+      marqueeEl.style.left = (Math.min(marquee.x0, marquee.x1) - sr.left) + "px";
+      marqueeEl.style.top = (Math.min(marquee.y0, marquee.y1) - sr.top) + "px";
+      marqueeEl.style.width = Math.abs(marquee.x1 - marquee.x0) + "px";
+      marqueeEl.style.height = Math.abs(marquee.y1 - marquee.y0) + "px";
+    }
+  });
+  window.addEventListener("pointerup", (e) => {
+    if (pan) pan = null;
+    if (marquee) {
+      const small = Math.abs(e.clientX - marquee.x0) < 3 && Math.abs(e.clientY - marquee.y0) < 3;
+      if (small) { if (!marquee.base.size) select(null); }
+      else marqueeSelect(marquee.x0, marquee.y0, e.clientX, e.clientY, marquee.base);
+      if (marqueeEl) marqueeEl.style.display = "none";
+      marquee = null;
+    }
+  });
+  window.addEventListener("pointercancel", () => { pan = null; if (marqueeEl) marqueeEl.style.display = "none"; marquee = null; });
   window.addEventListener("keydown", (e) => { if (e.code === "Space" && !/INPUT|SELECT|TEXTAREA/.test(e.target.tagName || "")) { spaceDown = true; stage.style.cursor = "grab"; } });
   window.addEventListener("keyup", (e) => { if (e.code === "Space") { spaceDown = false; stage.style.cursor = ""; } });
   document.addEventListener("keydown", (e) => {
     const exportOpen = !$("#exportModal").classList.contains("hidden");
     const v3dOpen = !$("#view3dModal").classList.contains("hidden");
+    const helpOpen = !$("#helpModal").classList.contains("hidden");
     // Escape closes a modal first (works even when a slider inside it has focus)
-    if (e.key === "Escape" && (exportOpen || v3dOpen)) { if (exportOpen) $("#exportModal").classList.add("hidden"); else $("#view3dModal").classList.add("hidden"); return; }
+    if (e.key === "Escape" && (exportOpen || v3dOpen || helpOpen)) { if (exportOpen) closeModal($("#exportModal")); else if (v3dOpen) closeModal($("#view3dModal")); else closeModal($("#helpModal")); return; }
     const tgt = e.target;
     // Only text-like fields own their keys (typing, native Ctrl+C, Esc-revert). A focused
     // range/checkbox/color/select must still let modifier chords, Delete and Escape through

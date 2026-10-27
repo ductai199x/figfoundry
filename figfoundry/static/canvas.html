@@ -16,6 +16,7 @@
     })();
   </script>
   <title>Fig Foundry — Canvas</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='%232f6690'/%3E%3Cpolyline points='16,45 27,31 35,39 49,20' fill='none' stroke='%23fff' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/canvas.css">
 </head>
@@ -40,6 +41,7 @@
         <button id="zoomFit" class="textbtn">Fit</button>
       </div>
       <button id="themeBtn" class="iconbtn" title="Theme (light / dark / system)" aria-label="Toggle theme">&#9790;</button>
+      <button id="helpBtn" class="iconbtn" title="Help &amp; shortcuts" aria-label="Help and shortcuts">?</button>
       <button id="exportBtn" class="primary">Export code</button>
     </header>
 
@@ -134,6 +136,14 @@
           <button id="v3dAccept" class="primary">Accept view</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Help and shortcuts">
+    <div class="modal-card" style="max-width:540px">
+      <div class="modal-head"><h3>Help &amp; shortcuts</h3><button id="helpClose" class="iconbtn" title="Close" aria-label="Close">&#10005;</button></div>
+      <div class="help-list" id="helpList"></div>
+      <div class="modal-actions modal-actions-right"><button id="helpOk" class="primary">Got it</button></div>
     </div>
   </div>
 

@@ -52,6 +52,27 @@ def _export_md5(spec, tmp_path):
     return _md5(ns["build"]())
 
 
+# ---------------------------------------------------------------- mathtext + rotation
+def test_mathtext_and_rotation_pass_through(data_dir):
+    """Text fields carry LaTeX mathtext ($...$) and rotation through to the built
+    figure; nothing strips or escapes them."""
+    p = _plot("p0", "line", x="@x", y="@y")
+    p["title"] = {"text": "$\\alpha$ title", "visible": True, "rotation": 30, "x": 0.5, "y": 1.0, "pad": 1.0,
+                  "fontsize": 11, "weight": "normal", "color": "#000"}
+    spec = _spec([p], figarts=[{"type": "text", "x": 0.5, "y": 0.5, "text": "$x = ax + b$",
+                                "ha": "center", "va": "center", "fontsize": 12, "color": "#000", "rotation": 90}])
+    code = canvas.codegen_canvas(spec)
+    compile(code, "<gen>", "exec")  # valid Python
+    fig = canvas.build_figure(spec)
+    try:
+        assert "$\\alpha$ title" in [ax.title.get_text() for ax in fig.axes]   # mathtext intact in the title
+        assert "$x = ax + b$" in [t.get_text() for t in fig.texts]             # mathtext intact in a figure text
+        assert 90 in [t.get_rotation() for t in fig.texts]                     # rotation applied
+    finally:
+        plt.close(fig)
+    assert "set_rotation(30" in code and "rotation=90" in code                 # and in the exported source
+
+
 # ---------------------------------------------------------------- extra lines
 def test_extra_lines_render(data_dir, tmp_path):
     """A line plot with extra lines: the emitted call is valid Python (used to be
