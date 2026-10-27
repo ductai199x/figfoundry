@@ -40,6 +40,8 @@ signal onto the canvas and it becomes a plot. Move and resize plots with snappin
 and style each one in the inspector, add the second series or the σ-band, and when it is
 right, export the code. Because the preview is rendered by running that very code, there is
 no "close enough" — the figure you arrange and the script you ship are the same drawing.
+And because every canvas action is also a plain HTTP API call, an AI agent can compose and
+edit a figure end-to-end with no GUI at all — then you fine-tune the result in the browser.
 
 <table>
   <tr>
@@ -66,6 +68,18 @@ no "close enough" — the figure you arrange and the script you ship are the sam
       A local web app. Your datasets, figures and exports live in <code>~/.figfoundry</code>;
       nothing you load is sent anywhere. Pickle files load through a whitelist, not a
       deserializer.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Agent-native</b><br>
+      Every canvas action is a plain HTTP API call, so an AI agent can compose and edit a
+      figure end-to-end with no GUI — then you polish the result in the browser.
+    </td>
+    <td width="50%" valign="top">
+      <b>Type any value</b><br>
+      Every number is a click-to-edit field (Enter commits), with a full ⌘/Ctrl keyboard
+      model — the same on macOS and Windows.
     </td>
   </tr>
 </table>
@@ -114,6 +128,10 @@ security probes.
 
 ## What it does
 
+- **Built for AI agents.** The editor is a JSON spec over a small HTTP API — load a dataset,
+  set the plots and artists, render, export. An agent can build and revise a figure with no
+  GUI (that is how our paper figures are made); you then fine-tune the result visually in the
+  browser.
 - **Composes on a free canvas.** Plots are explicit rectangles, not a fixed grid, so they
   go anywhere and at any size. Move and resize with snapping (on plots *and* on labels),
   drag a marquee to select a group, and move, nudge, rotate, copy/paste or delete them
