@@ -252,11 +252,14 @@ function addRotHandle(movDiv, id) {
     const startAng = Math.atan2(e.clientY - cy0, e.clientX - cx0);
     const tgt = rotTarget(id); const rot0 = tgt.get();
     if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
+    // CSS rotate() is clockwise-positive (screen), matplotlib rotation is
+    // counterclockwise-positive, so the box preview is rotate(-spec).
+    movDiv.style.transform = `rotate(${-rot0}deg)`;
     const onMove = (ev) => {
-      let d = (Math.atan2(ev.clientY - cy0, ev.clientX - cx0) - startAng) * 180 / Math.PI;
+      let d = (Math.atan2(ev.clientY - cy0, ev.clientX - cx0) - startAng) * 180 / Math.PI;  // CW-positive on screen
       if (ev.shiftKey) d = Math.round(d / 15) * 15;
-      let r = Math.round(rot0 + d); r = ((r % 360) + 360) % 360; if (r > 180) r -= 360;
-      tgt.set(r); movDiv.style.transform = `rotate(${r}deg)`; scheduleDraft();
+      let S = Math.round(rot0 - d); S = ((S % 360) + 360) % 360; if (S > 180) S -= 360;  // spec (CCW+), normalized
+      tgt.set(S); movDiv.style.transform = `rotate(${-S}deg)`; scheduleDraft();
     };
     const onUp = (ev) => { try { h.releasePointerCapture(ev.pointerId); } catch (_) {} document.removeEventListener("pointermove", onMove); document.removeEventListener("pointerup", onUp); movDiv.style.transform = ""; commitSnapshot(); commit(); };
     document.addEventListener("pointermove", onMove); document.addEventListener("pointerup", onUp);
