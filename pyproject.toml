@@ -1,6 +1,6 @@
 [project]
 name = "figfoundry"
-version = "0.3.1"
+version = "0.4.0"
 description = "WYSIWYG matplotlib figure composer: load data (.npz/.pkl), drag signals onto a canvas to build plots, and export clean reproducible code."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,7 +50,7 @@ packages = ["figfoundry"]
 [tool.hatch.build.targets.sdist]
 # tests/ is dev-only; media/ (README screenshots) and .github/ (CI) are not
 # needed to install the package, so keep them out of the source distribution.
-exclude = ["tests", "media", ".github", "dist"]
+exclude = ["tests", "media", ".github", "dist", "notes"]
 
 [tool.ruff]
 line-length = 110
