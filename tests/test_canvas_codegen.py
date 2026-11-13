@@ -7,6 +7,7 @@ in 2-D slots, non-positive pie values, extra lines, and render failures.
 import hashlib
 import io
 import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pytest
@@ -45,7 +46,7 @@ def _plot(pid, ptype, **data):
 
 def _export_md5(spec, tmp_path):
     """Render the standalone export the same way a user would (exec the .py)."""
-    out = tmp_path / "export.py"
+    out = Path(canvas.DATA_DIR) / "export.py"  # next to the dataset, as a user would
     out.write_text(canvas.codegen_canvas(spec), encoding="utf-8")
     ns = {"__file__": str(out)}
     exec(compile(out.read_text(encoding="utf-8"), str(out), "exec"), ns)
@@ -253,7 +254,7 @@ def test_empty_csv_loader(data_dir, tmp_path):
     with open(path, "w", encoding="utf-8") as f:
         f.write("")
     spec = _spec([], dataset="empty.csv")
-    out = tmp_path / "export.py"
+    out = Path(canvas.DATA_DIR) / "export.py"  # next to the dataset, as a user would
     out.write_text(canvas.codegen_canvas(spec), encoding="utf-8")
     ns = {"__file__": str(out)}
     exec(compile(out.read_text(encoding="utf-8"), str(out), "exec"), ns)

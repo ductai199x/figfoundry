@@ -19,16 +19,25 @@ Layers:
 """
 import base64
 import io
+import itertools
 import os
+import re
 
 import numpy as np
 
-from . import data_io
+from . import __version__, data_io
 
 DATA_DIR = data_io.DATA_DIR
+# Interactive preview resolution only. Exports (GET /figure, CLI render/export)
+# use the canvas "dpi" from the spec, which is also the generated script's
+# default --dpi, so a server export and a script run are the same image.
 PREVIEW_DPI = 150
 _RED = "#b03a2e"
 _BLUE = "#2f6690"
+
+# Spec format version. Bump when the spec gains fields an older figfoundry would
+# silently drop. A spec whose schema_version is newer than this gets a warning.
+SCHEMA_VERSION = 2
 
 # filename -> ((mtime_ns, size), arrays). The (mtime, size) key invalidates the
 # entry when the file is replaced or shrunk/grown under the same name.
@@ -56,24 +65,56 @@ def get_dataset_arrays(filename):
 
 
 # --------------------------------------------------------------------------- data refs
+# "@name[0:8]" / "@name[:, 2]" / "@name[::-1]": a numpy-style basic slice. Only
+# digits, colons, commas, minus signs and spaces are allowed inside the brackets,
+# so the emitted subscript can never be an arbitrary expression.
+_SLICE_REF = re.compile(r"^@(.+?)\[([0-9:,\s-]*)\]$")
+_SLICE_PART = re.compile(r"(-?\d+)?(:(-?\d+)?){0,2}")
+
+
+def _slice_code(body):
+    """'0:8, 2' -> '0:8,2' if every comma part is a valid basic slice/index, else None."""
+    parts = [part.strip() for part in body.split(",")]
+    if not parts or any(not part or not _SLICE_PART.fullmatch(part) for part in parts):
+        return None
+    return ",".join(parts)
+
+
 def ref_to_code(ref):
     """Emit the Python expression that reproduces a signal reference (indexes ``data``).
 
     Only "@name" strings are signal refs; anything else (None, a bare number, a
     dict) means "no signal" and emits None. Emitting repr(5) would generate
-    code that crashes at exec time (e.g. len(5) inside the guards)."""
+    code that crashes at exec time (e.g. len(5) inside the guards).
+
+    "@name[a:b]" (rows a..b) and "@name[a:b, c:d]" slice the signal with numpy
+    basic indexing, so one dataset array can feed several panels."""
     if not (isinstance(ref, str) and ref.startswith("@")):
         return "None"
+    m = _SLICE_REF.match(ref)
+    sl = _slice_code(m.group(2)) if m else None
+    if sl is not None:
+        return f"data[{m.group(1)!r}][{sl}]"
     return f'data[{ref[1:]!r}]'
+
+
+# The generated script finds its dataset next to itself (portable: no absolute,
+# user-specific path is baked in). The preview executes the same code with
+# __file__ pointing into the dataset directory, so both resolve the same file.
+_DATA_PATH_LINES = [
+    "from pathlib import Path",
+    "# default: the dataset file next to this script (override with --data)",
+    'DATA_DEFAULT = str((Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()) / DATA_FILE)',
+]
 
 
 def dataset_loader_code(filename):
     """Emit the Python that loads the dataset file into ``data`` (a dict of arrays)."""
-    path = os.path.join(DATA_DIR, filename)
+    path_lines = [f"DATA_FILE = {os.path.basename(str(filename))!r}", *_DATA_PATH_LINES]
     if filename.endswith(".npz"):
         return [
             "import numpy as np",
-            f"DATA_DEFAULT = {path!r}",
+            *path_lines,
             "def _load_data(p):",
             "    _ds = np.load(p, allow_pickle=False)",
             "    return {k: _ds[k] for k in _ds.files}",
@@ -85,7 +126,7 @@ def dataset_loader_code(filename):
     if filename.endswith(".csv"):
         return [
             "import numpy as np, csv",
-            f"DATA_DEFAULT = {path!r}",
+            *path_lines,
             "def _load_data(p):",
             "    _f = open(p, newline='', encoding='utf-8-sig'); _rows = [r for r in csv.reader(_f) if any(c.strip() for c in r)]; _f.close()",
             "    _data = {}",
@@ -121,7 +162,7 @@ def dataset_loader_code(filename):
         '        raise pickle.UnpicklingError("blocked " + m + "." + n)',
         "def _safe_load(p):",
         '    with open(p, "rb") as f: return _SafeUnpickler(f).load()',
-        f"DATA_DEFAULT = {path!r}",
+        *path_lines,
         "def _load_data(p):",
         "    _obj = _safe_load(p)",
         "    _items = _obj.items() if isinstance(_obj, dict) else [('data', _obj)]",
@@ -136,6 +177,7 @@ def dataset_loader_code(filename):
 # --------------------------------------------------------------------------- scene model
 def blank_spec():
     return {
+        "schema_version": SCHEMA_VERSION,
         "dataset": None,
         "canvas": {"width": 7.4, "height": 4.5, "dpi": 220, "bg": "#ffffff",
                    "font_family": "DejaVu Sans", "font_size": 14},
@@ -206,24 +248,252 @@ def _bins(st):
     return int(b) if b > 0 else 20
 
 
+def canvas_dpi(spec):
+    """The canvas dpi exactly as codegen emits it (figure dpi and the script's
+    default --dpi). Exports render at this dpi so they match the script."""
+    c = spec.get("canvas") if isinstance(spec, dict) else None
+    if not isinstance(c, dict):
+        c = blank_spec()["canvas"]
+    return max(1, int(_num(c.get("dpi"), PREVIEW_DPI)))
+
+
+def _aspect(v):
+    """'equal' / 'auto' / a positive number, else None (invalid or unset)."""
+    if v in ("equal", "auto"):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        f = _num(v, 0)
+        return f if f > 0 else None
+    return None
+
+
+_NORMS = ("linear", "log", "symlog")
+
+
+def _color_scale_kw(st):
+    """Optional ', vmin=…, vmax=…, norm=…' for colormapped plots. Emits nothing
+    when unset, so existing specs generate the same code as before."""
+    kw = ""
+    for k in ("vmin", "vmax"):
+        v = st.get(k)
+        if v is not None and not isinstance(v, bool):
+            f = _num(v, None)
+            if f is not None:
+                kw += f", {k}={f!r}"
+    norm = st.get("norm")
+    if norm in ("log", "symlog"):
+        kw += f", norm={norm!r}"
+    return kw
+
+
+def _stroke_kw(art):
+    """Optional text outline: "stroke": {"width": 2, "color": "#000"}."""
+    sk = art.get("stroke")
+    if not isinstance(sk, dict):
+        return ""
+    w = _num(sk.get("width"), 0)
+    if w <= 0:
+        return ""
+    return f", path_effects=[patheffects.withStroke(linewidth={w!r}, foreground={sk.get('color', '#000000')!r})]"
+
+
+def _uses_stroke(spec):
+    arts = list(spec.get("figure_artists") or [])
+    for p in spec.get("plots") or []:
+        if isinstance(p, dict):
+            arts.extend(p.get("artists") or [])
+    return any(isinstance(a, dict) and _stroke_kw(a) for a in arts)
+
+
+def _tag_comment(obj):
+    """'  # id=…, tag=…' for an object carrying an optional id/tag, else ''."""
+    if not isinstance(obj, dict):
+        return ""
+    bits = [f"{k}={str(obj[k])!r}" for k in ("id", "tag") if obj.get(k) not in (None, "")]
+    return ("  # " + ", ".join(bits)) if bits else ""
+
+
+# --------------------------------------------------------------------------- spec validation (warnings)
+PLOT_TYPES = (
+    "line", "step", "scatter", "scatter-grouped", "bar", "barh", "histogram", "boxplot",
+    "violinplot", "hist2d", "hexbin", "imshow", "contourf", "contour", "pcolormesh",
+    "quiver", "streamplot", "decision-boundary", "pie", "polar", "scatter-3d", "surface",
+    "wireframe",
+)
+_TOP_KEYS = {"schema_version", "min_figfoundry", "dataset", "canvas", "layout", "plots",
+             "figure_artists", "meta"}
+_CANVAS_KEYS = {"width", "height", "dpi", "bg", "font_family", "font_size"}
+_LAYOUT_KEYS = {"margin", "gap"}
+_PLOT_KEYS = {"id", "tag", "rect", "type", "data", "style", "extra_lines", "axes", "title", "artists"}
+_DATA_KEYS = {"x", "y", "z", "field", "band", "errorbar"}
+_STYLE_KEYS = {"color", "lw", "marker", "ms", "alpha", "band_alpha", "width", "cmap", "bins",
+               "colorbar", "elev", "azim", "dist", "aspect", "vmin", "vmax", "norm"}
+_AXES_KEYS = {"xticks", "xticklabels", "yticks", "yticklabels", "xlabel", "ylabel",
+              "xlabel_visible", "ylabel_visible", "xlim", "ylim", "xscale", "yscale", "spines",
+              "tick_labelsize", "labelbottom", "labelleft", "label_fontsize", "tick_params"}
+_TICK_PARAMS_KEYS = {"axis", "bottom", "top", "left", "right", "length", "width", "pad", "direction"}
+_TITLE_KEYS = {"text", "x", "y", "pad", "fontsize", "weight", "color", "visible", "rotation"}
+_EXTRA_LINE_KEYS = {"ref", "color", "lw", "marker", "ms", "alpha", "label", "id", "tag"}
+_ERRORBAR_KEYS = {"ref", "color", "lw"}
+_HANDLE_KEYS = {"color", "ls", "lw", "marker", "ms"}
+_COMMON_ART_KEYS = {"type", "id", "tag"}
+ARTIST_KEYS = {
+    "vline": {"x", "color", "ls", "lw", "alpha", "zorder"},
+    "hline": {"y", "color", "ls", "lw", "alpha", "zorder"},
+    "text": {"x", "y", "text", "ha", "va", "fontsize", "color", "rotation", "axes_frac", "coords",
+             "stroke", "zorder"},
+    "legend": {"handles", "labels", "loc", "ncol", "frameon", "fontsize"},
+    "annotation": {"text", "xy", "xytext", "color", "lw", "fontsize", "rotation"},
+    "box": {"x0", "y0", "w", "h", "fc", "alpha", "ec", "lw", "coords", "zorder"},
+    "vspan": {"x0", "x1", "color", "alpha", "zorder"},
+    "circle": {"x", "y", "r", "fill", "color", "lw", "alpha", "zorder"},
+    "ellipse": {"x", "y", "w", "h", "angle", "fill", "color", "lw", "alpha", "zorder"},
+    "polygon": {"points", "fill", "color", "lw", "alpha", "zorder"},
+    "arrow": {"x0", "y0", "x1", "y1", "color", "lw"},
+    "cell_marks": {"cells", "marker", "color", "fc", "lw", "inset", "alpha", "zorder"},
+}
+FIGARTIST_KEYS = {
+    "legend": {"handles", "labels", "loc", "ncol", "frameon", "fontsize"},
+    "text": {"x", "y", "text", "ha", "va", "fontsize", "color", "rotation", "stroke"},
+    "suptitle": {"text", "x", "y", "fontsize", "color", "rotation"},
+    "line": {"x0", "y0", "x1", "y1", "color", "ls", "lw", "alpha", "zorder"},
+}
+_MAX_WARNINGS = 50
+
+
+def _version_tuple(v):
+    out = []
+    for part in str(v).split("."):
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        out.append(int(m.group()))
+    return tuple(out)
+
+
+def spec_warnings(spec):
+    """Everything in a spec that this figfoundry would silently drop or cannot honor:
+    unknown plot/artist types, unknown keys, and a spec made for a newer version.
+
+    Rendering never fails on these (a bad element blanks itself); the warnings
+    make the drop visible in the render/export response and in the generated code."""
+    w = []
+    if not isinstance(spec, dict):
+        return ["spec is not a JSON object"]
+
+    def unknown(where, obj, known):
+        if isinstance(obj, dict):
+            for k in obj:
+                if k not in known:
+                    w.append(f"{where}: unknown key {k!r} (ignored)")
+
+    sv = spec.get("schema_version")
+    if sv is not None:
+        try:
+            svi = int(sv)
+        except (TypeError, ValueError):
+            w.append(f"schema_version {sv!r} is not an integer")
+        else:
+            if svi > SCHEMA_VERSION:
+                w.append(f"spec schema_version {svi} is newer than this figfoundry supports "
+                         f"({SCHEMA_VERSION}); upgrade figfoundry (some features may be dropped)")
+    mf = spec.get("min_figfoundry")
+    if mf is not None and _version_tuple(mf) > _version_tuple(__version__) and __version__ != "0.0.0":
+        w.append(f"spec needs figfoundry >= {mf}, but this is {__version__}; upgrade figfoundry "
+                 f"(some features may be dropped)")
+    unknown("spec", spec, _TOP_KEYS)
+    unknown("canvas", spec.get("canvas"), _CANVAS_KEYS)
+    unknown("layout", spec.get("layout"), _LAYOUT_KEYS)
+    for i, p in enumerate(spec.get("plots") or []):
+        if not isinstance(p, dict):
+            w.append(f"plot {i}: not an object (skipped)")
+            continue
+        where = f"plot {p.get('id', i)!r}"
+        t = p.get("type", "line")
+        if t not in PLOT_TYPES:
+            w.append(f"{where}: unknown plot type {t!r} (drawn as a plain line)")
+        unknown(where, p, _PLOT_KEYS)
+        unknown(f"{where} data", p.get("data"), _DATA_KEYS)
+        unknown(f"{where} style", p.get("style"), _STYLE_KEYS)
+        unknown(f"{where} axes", p.get("axes"), _AXES_KEYS)
+        unknown(f"{where} title", p.get("title"), _TITLE_KEYS)
+        st = p.get("style") if isinstance(p.get("style"), dict) else {}
+        if "aspect" in st and _aspect(st["aspect"]) is None:
+            w.append(f"{where} style: aspect {st['aspect']!r} is not 'equal', 'auto' or a positive number (ignored)")
+        if st.get("norm") not in (None, *_NORMS):
+            w.append(f"{where} style: norm {st['norm']!r} is not one of {list(_NORMS)} (ignored)")
+        ax = p.get("axes") if isinstance(p.get("axes"), dict) else {}
+        unknown(f"{where} axes.tick_params", ax.get("tick_params"), _TICK_PARAMS_KEYS)
+        d = p.get("data") if isinstance(p.get("data"), dict) else {}
+        unknown(f"{where} data.errorbar", d.get("errorbar"), _ERRORBAR_KEYS)
+        for j, el in enumerate(p.get("extra_lines") or []):
+            unknown(f"{where} extra_lines[{j}]", el, _EXTRA_LINE_KEYS)
+        for j, a in enumerate(p.get("artists") or []):
+            if not isinstance(a, dict):
+                w.append(f"{where} artist {j}: not an object (skipped)")
+                continue
+            at = a.get("type")
+            if at not in ARTIST_KEYS:
+                w.append(f"{where} artist {j}: unknown artist type {at!r} (not drawn)")
+                continue
+            unknown(f"{where} artist {j} ({at})", a, ARTIST_KEYS[at] | _COMMON_ART_KEYS)
+            if at == "legend":
+                for h in a.get("handles") or []:
+                    unknown(f"{where} artist {j} (legend) handle", h, _HANDLE_KEYS)
+            if at == "cell_marks" and a.get("marker", "box") not in ("box", "x", "dot"):
+                w.append(f"{where} artist {j} (cell_marks): marker {a.get('marker')!r} is not box/x/dot (not drawn)")
+            if a.get("coords") not in (None, "data", "axes"):
+                w.append(f"{where} artist {j} ({at}): coords {a.get('coords')!r} is not 'data' or 'axes' (ignored)")
+    for j, fa in enumerate(spec.get("figure_artists") or []):
+        if not isinstance(fa, dict):
+            w.append(f"figure artist {j}: not an object (skipped)")
+            continue
+        ft = fa.get("type")
+        if ft not in FIGARTIST_KEYS:
+            w.append(f"figure artist {j}: unknown figure artist type {ft!r} (not drawn)")
+            continue
+        unknown(f"figure artist {j} ({ft})", fa, FIGARTIST_KEYS[ft] | _COMMON_ART_KEYS)
+        if ft == "legend":
+            for h in fa.get("handles") or []:
+                unknown(f"figure artist {j} (legend) handle", h, _HANDLE_KEYS)
+    if len(w) > _MAX_WARNINGS:
+        w = [*w[:_MAX_WARNINGS], f"... and {len(w) - _MAX_WARNINGS} more"]
+    return w
+
+
 # --------------------------------------------------------------------------- codegen (the single drawing path)
 def codegen_canvas(spec, detail=True):
+    """The standalone .py for a spec (see codegen_canvas_full for the warnings)."""
+    return codegen_canvas_full(spec, detail=detail)[0]
+
+
+def codegen_canvas_full(spec, detail=True):
+    """Serialize the spec to a standalone .py. Returns (code, warnings): the
+    warnings list everything the spec asked for that is not drawn (unknown types
+    and keys, invalid elements, a newer schema); they are also written as
+    comments at the top of the code."""
+    warnings = spec_warnings(spec)
     # A spec can be client-controlled (POST /render) or hand-edited; missing or
     # junk top-level fields must degrade to blanks, never a 500.
     c = spec.get("canvas") or blank_spec()["canvas"]
+    if not isinstance(c, dict):
+        c = blank_spec()["canvas"]
     # clamp to sane positive values: figsize/dpi/font-size reject 0/negative at
     # exec time, and a client spec can carry anything
     width = max(0.1, _num(c.get("width"), 7.4))
     height = max(0.1, _num(c.get("height"), 4.5))
-    dpi = max(1, int(_num(c.get("dpi"), PREVIEW_DPI)))
+    dpi = canvas_dpi(spec)
     font_size = max(1.0, _num(c.get("font_size"), 14))
     s = []
     ds = spec.get("dataset")
     ref = f"dataset {ds!r}" if ds else "no dataset (load data first)"
     s.append(f'"""Canvas figure -- generated by Fig Foundry. WYSIWYG: references {ref}."""')
+    warn_at = len(s)  # warning comments are inserted here once codegen is done
     s.append('import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt')
     s.append("from matplotlib.lines import Line2D")
     s.append("from matplotlib.patches import Rectangle, Circle, Ellipse, Polygon")
+    if _uses_stroke(spec):
+        s.append("import matplotlib.patheffects as patheffects")
     s.append("")
     s.append("# ---- data (dataset) ----")
     if ds:
@@ -238,7 +508,8 @@ def codegen_canvas(spec, detail=True):
     for p in spec.get("plots") or []:
         i0 = len(s)
         try:
-            s.append(f"    # ---- plot {p['id']} ----")
+            _tg = p.get("tag")
+            s.append(f"    # ---- plot {p['id']} ----" + (f"  tag={str(_tg)!r}" if _tg not in (None, "") else ""))
             t = p.get("type", "line")
             if t in ("scatter-3d", "surface", "wireframe"):
                 proj = "projection='3d'"
@@ -295,9 +566,11 @@ def codegen_canvas(spec, detail=True):
                     s.append(f"    if {' and '.join(conds)}: ax.errorbar({eb_x}, {ycode}, yerr=_eb, fmt='none', ecolor={eb.get('color', st.get('color', _RED))!r}, elinewidth={_num(eb.get('lw'), 1.0)!r}, capsize=2, zorder=2)")
             for ai, art in enumerate((p.get("artists") if detail else []) or []):
                 try:
-                    s.append("    " + _codegen_artist(art))
-                except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+                    s.append("    " + _codegen_artist(art, t) + _tag_comment(art))
+                except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
                     s.append(f"    pass  # artist {ai} skipped (invalid)")
+                    if isinstance(art, dict):
+                        warnings.append(f"plot {p.get('id')!r} artist {ai} ({art.get('type')}): invalid, skipped ({type(e).__name__}: {e})")
             if detail:
                 tt = p.get("title") or {}
                 if tt.get("visible"):
@@ -307,19 +580,23 @@ def codegen_canvas(spec, detail=True):
                     _trot = _num(tt.get("rotation"), 0)
                     if _trot:
                         s.append(f"    ax.title.set_rotation({_trot!r})")
-        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
             # One malformed plot blanks itself out; it must not sink the whole render.
             pid = p.get("id", "?") if isinstance(p, dict) else "?"
             s[i0:] = [f"    pass  # plot {pid!r} skipped (invalid spec)"]
+            if isinstance(p, dict):
+                warnings.append(f"plot {pid!r}: invalid, skipped ({type(e).__name__}: {e})")
     if detail:
         fas = spec.get("figure_artists") or []
         if fas:
             s.append("    # ---- figure-level artists ----")
             for j, fa in enumerate(fas):
                 try:
-                    s.append("    " + _codegen_figartist(fa))
-                except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+                    s.append("    " + _codegen_figartist(fa) + _tag_comment(fa))
+                except (KeyError, TypeError, ValueError, IndexError, AttributeError) as e:
                     s.append(f"    pass  # figure artist {j} skipped (invalid)")
+                    if isinstance(fa, dict):
+                        warnings.append(f"figure artist {j} ({fa.get('type')}): invalid, skipped ({type(e).__name__}: {e})")
     s.append("    return fig")
     s.append("")
     s.append('if __name__ == "__main__":')
@@ -328,13 +605,21 @@ def codegen_canvas(spec, detail=True):
     s.append('    ap.add_argument("--format", default="png", choices=["png", "svg", "pdf"])')
     s.append(f"    ap.add_argument(\"--dpi\", type=int, default={dpi})")
     if ds:
-        s.append('    ap.add_argument("--data", default=DATA_DEFAULT, help="path to the dataset file (default is where this figure was made)")')
+        s.append('    ap.add_argument("--data", default=DATA_DEFAULT, help="path to the dataset file (default: the dataset next to this script)")')
+    s.append('    ap.add_argument("--out", default=None, help="output file (default: fig.<format>)")')
     s.append("    a = ap.parse_args()")
     if ds:
         s.append("    try: data = _load_data(a.data)")
         s.append('    except FileNotFoundError as _e: raise SystemExit(f"dataset not found: {_e}; pass --data /path/to/your/dataset")')
-    s.append('    fig = build(); fig.savefig(f"fig.{a.format}", dpi=a.dpi)')
-    return "\n".join(s) + "\n"
+    s.append('    fig = build(); fig.savefig(a.out or f"fig.{a.format}", dpi=a.dpi, format=a.format)')
+    if warnings:
+        s[warn_at:warn_at] = ["# WARNING (figfoundry): this spec has parts that are not drawn:",
+                              *[f"#   - {_one_line(m)}" for m in warnings]]
+    return "\n".join(s) + "\n", warnings
+
+
+def _one_line(msg):
+    return " ".join(str(msg).split())
 
 
 def _view3d(s, st):
@@ -344,6 +629,14 @@ def _view3d(s, st):
     s.append(f"    ax.view_init(elev={_num(st.get('elev'), 30)!r}, azim={_num(st.get('azim'), -60)!r})")
     s.append(f"    try: ax._dist = {_num(st.get('dist'), 10)!r}")
     s.append("    except Exception: pass")
+
+
+def _set_aspect(s, st):
+    """contour/contourf/pcolormesh take no aspect kwarg: set it on the axes, and
+    only when the spec asks (their matplotlib default is 'auto')."""
+    asp = _aspect(st.get("aspect"))
+    if asp is not None:
+        s.append(f"    ax.set_aspect({asp!r})")
 
 
 def _codegen_plot(s, p, detail, xcode, ycode, zcode, fcode, st):
@@ -362,6 +655,7 @@ def _codegen_plot(s, p, detail, xcode, ycode, zcode, fcode, st):
     cmap = st.get("cmap", "viridis")
     bins = _bins(st)
     cb = detail and st.get("colorbar")
+    ckw = _color_scale_kw(st)  # '' unless vmin/vmax/norm are set
     # pair guards: user-supplied x and y must agree in length (or shape, for
     # vector fields); z must agree with the plotted points.
     xy_ok = "" if xcode == "None" else f" and len({xcode}) == len({ycode})"
@@ -382,7 +676,7 @@ def _codegen_plot(s, p, detail, xcode, ycode, zcode, fcode, st):
     elif t == "scatter-grouped":
         xarg = f"np.arange({ycode}.shape[0])" if xcode == "None" else xcode
         g = f"{ycode} is not None{xy_ok}{z_ok}"
-        s.append(f"    if {g}: _m = ax.scatter({xarg}, {ycode}, c={zcode}, cmap={cmap!r}, s=max(1, {ms!r} ** 2), edgecolors='none', alpha={alpha!r}, zorder=3)")
+        s.append(f"    if {g}: _m = ax.scatter({xarg}, {ycode}, c={zcode}, cmap={cmap!r}, s=max(1, {ms!r} ** 2), edgecolors='none', alpha={alpha!r}, zorder=3{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_m, ax=ax, pad=0.02)")
     elif t == "bar":
@@ -414,31 +708,35 @@ def _codegen_plot(s, p, detail, xcode, ycode, zcode, fcode, st):
         xarg = f"np.arange({ycode}.shape[0])" if xcode == "None" else xcode
         g = (f"{ycode} is not None and np.ndim({xarg}) == 1 and len({xarg}) == len({ycode})"
              f" and np.isfinite({xarg}).any() and np.isfinite({ycode}).any()")
-        s.append(f"    if {g}: _h = ax.hist2d({xarg}, {ycode}, bins={bins!r}, cmap={cmap!r})")
+        s.append(f"    if {g}: _h = ax.hist2d({xarg}, {ycode}, bins={bins!r}, cmap={cmap!r}{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_h[3], ax=ax, pad=0.02)")
     elif t == "hexbin":
         xarg = f"np.arange({ycode}.shape[0])" if xcode == "None" else xcode
         g = f"{ycode} is not None and np.ndim({xarg}) == 1 and len({xarg}) == len({ycode})"
-        s.append(f"    if {g}: _m = ax.hexbin({xarg}, {ycode}, gridsize={bins!r}, cmap={cmap!r})")
+        s.append(f"    if {g}: _m = ax.hexbin({xarg}, {ycode}, gridsize={bins!r}, cmap={cmap!r}{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_m, ax=ax, pad=0.02)")
     elif t == "imshow":
         g = field2d
-        s.append(f"    if {g}: _m = ax.imshow({fcode}, cmap={cmap!r}, origin='upper')")
+        # imshow takes aspect as a kwarg ('equal' is matplotlib's default for images)
+        asp = _aspect(st.get("aspect")) or "equal"
+        s.append(f"    if {g}: _m = ax.imshow({fcode}, cmap={cmap!r}, origin='upper', aspect={asp!r}{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_m, ax=ax, pad=0.02)")
     elif t in ("contourf", "contour"):
         # contour() needs at least a (2, 2) field
         g = f"{field2d} and {fcode}.shape[0] >= 2 and {fcode}.shape[1] >= 2"
-        s.append(f"    if {g}: _m = ax.{t}({fcode}, cmap={cmap!r})")
+        s.append(f"    if {g}: _m = ax.{t}({fcode}, cmap={cmap!r}{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_m, ax=ax, pad=0.02)")
+        _set_aspect(s, st)
     elif t == "pcolormesh":
         g = field2d
-        s.append(f"    if {g}: _m = ax.pcolormesh({fcode}, cmap={cmap!r})")
+        s.append(f"    if {g}: _m = ax.pcolormesh({fcode}, cmap={cmap!r}{ckw})")
         if cb:
             s.append(f"    if {g}: fig.colorbar(_m, ax=ax, pad=0.02)")
+        _set_aspect(s, st)
     elif t == "quiver":
         # 2-arg quiver(U, V): x slot = U field, y slot = V field (per the UI); U and V
         # must share a shape (1-D: equal length) or matplotlib raises.
@@ -489,12 +787,16 @@ def _codegen_axes(s, A):
     # try in the emitted code): a junk value blanks the setting instead of
     # raising here (500) or at exec time (ConversionError).
     tl = _numlist(A.get("xticks"))
-    if tl is not None:
+    if A.get("xticks") == []:          # explicit empty list hides the ticks
+        s.append("    ax.set_xticks([])")
+    elif tl is not None:
         s.append(f"    ax.set_xticks({tl!r})")
     if A.get("xticklabels") is not None:
         s.append(f"    ax.set_xticklabels({A['xticklabels']!r})")
     yl = _numlist(A.get("yticks"))
-    if yl is not None:
+    if A.get("yticks") == []:          # explicit empty list hides the ticks
+        s.append("    ax.set_yticks([])")
+    elif yl is not None:
         s.append(f"    ax.set_yticks({yl!r})")
     if A.get("yticklabels") is not None:
         s.append(f"    ax.set_yticklabels({A['yticklabels']!r})")
@@ -508,8 +810,10 @@ def _codegen_axes(s, A):
         s.append(f"    ax.set_xscale({A['xscale']!r})")
     if A.get("yscale") in ("log", "symlog", "logit"):
         s.append(f"    ax.set_yscale({A['yscale']!r})")
-    s.append(f"    ax.set_xlabel({A.get('xlabel', '')!r}, visible={A.get('xlabel_visible', True)})")
-    s.append(f"    ax.set_ylabel({A.get('ylabel', '')!r}, visible={A.get('ylabel_visible', True)})")
+    _ls = _num(A.get("label_fontsize"), 0)
+    _lkw = f", fontsize={_ls!r}" if _ls > 0 else ""
+    s.append(f"    ax.set_xlabel({A.get('xlabel', '')!r}, visible={A.get('xlabel_visible', True)}{_lkw})")
+    s.append(f"    ax.set_ylabel({A.get('ylabel', '')!r}, visible={A.get('ylabel_visible', True)}{_lkw})")
     sp = A.get("spines")
     if not isinstance(sp, dict):
         sp = {}
@@ -522,9 +826,54 @@ def _codegen_axes(s, A):
     if tsize > 0:
         ax_.append(f"labelsize={tsize!r}")
     s.append("    ax.tick_params(" + ", ".join(ax_) + ")")
+    # Optional tick marks control (visibility / length / direction). A second
+    # call, emitted only when set, so existing specs generate the same code.
+    tp = A.get("tick_params")
+    if isinstance(tp, dict):
+        kw = []
+        if tp.get("axis") in ("x", "y"):
+            kw.append(f"axis={tp['axis']!r}")
+        for k in ("bottom", "top", "left", "right"):
+            if isinstance(tp.get(k), bool):
+                kw.append(f"{k}={tp[k]!r}")
+        for k in ("length", "width", "pad"):
+            v = _num(tp.get(k), None) if tp.get(k) is not None else None
+            if v is not None and v >= 0:
+                kw.append(f"{k}={v!r}")
+        if tp.get("direction") in ("in", "out", "inout"):
+            kw.append(f"direction={tp['direction']!r}")
+        if [k for k in kw if not k.startswith("axis=")]:
+            s.append("    ax.tick_params(" + ", ".join(kw) + ")")
 
 
-def _codegen_artist(art):
+def _cell_marks_code(art, ptype):
+    """Markers on heatmap cells, in data coordinates so they follow the grid when
+    the plot is resized or re-gridded. cells = [[row, col], ...]. imshow cells
+    are centered on integer (col, row); pcolormesh cells span [c, c+1]."""
+    cells = [[int(r), int(c)] for r, c in art.get("cells") or []]
+    off = 0.5 if ptype == "pcolormesh" else 0.0
+    inset = min(0.45, max(0.0, _num(art.get("inset"), 0.08)))
+    half = 0.5 - inset
+    a0, a1, side = round(off - half, 6), round(off + half, 6), round(2 * half, 6)
+    color = art.get("color", "#000000")
+    lw = _num(art.get("lw"), 1.0)
+    alpha = _num(art.get("alpha"), 1.0)
+    z = int(_num(art.get("zorder"), 4))
+    marker = art.get("marker", "box")
+    if marker == "box":
+        return (f"for _r, _c in {cells!r}: ax.add_patch(Rectangle((_c + {a0!r}, _r + {a0!r}), {side!r}, {side!r}, "
+                f"fc={art.get('fc', 'none')!r}, ec={color!r}, lw={lw!r}, alpha={alpha!r}, zorder={z!r}))")
+    if marker == "x":
+        kw = f"color={color!r}, lw={lw!r}, alpha={alpha!r}, zorder={z!r}, solid_capstyle='round'"
+        return (f"for _r, _c in {cells!r}: ax.add_line(Line2D([_c + {a0!r}, _c + {a1!r}], [_r + {a0!r}, _r + {a1!r}], {kw})); "
+                f"ax.add_line(Line2D([_c + {a0!r}, _c + {a1!r}], [_r + {a1!r}, _r + {a0!r}], {kw}))")
+    if marker == "dot":
+        return (f"for _r, _c in {cells!r}: ax.add_patch(Ellipse((_c + {off!r}, _r + {off!r}), {side!r}, {side!r}, "
+                f"fc={color!r}, ec='none', alpha={alpha!r}, zorder={z!r}))")
+    raise ValueError(f"cell_marks marker {marker!r} is not box/x/dot")
+
+
+def _codegen_artist(art, ptype=None):
     t = art["type"]
     if t == "vline":
         return f'ax.axvline({float(art["x"])!r}, color={art.get("color", "#000000")!r}, ls={art.get("ls", "-")!r}, lw={_num(art.get("lw"), 1.0)!r}, alpha={_num(art.get("alpha"), 1.0)!r}, zorder={int(_num(art.get("zorder"), 2))!r})'
@@ -532,10 +881,17 @@ def _codegen_artist(art):
         return f'ax.axhline({float(art["y"])!r}, color={art.get("color", "#000000")!r}, ls={art.get("ls", "-")!r}, lw={_num(art.get("lw"), 1.0)!r}, alpha={_num(art.get("alpha"), 1.0)!r}, zorder={int(_num(art.get("zorder"), 2))!r})'
     if t == "text":
         base = f'ax.text({float(art["x"])!r}, {float(art["y"])!r}, {art.get("text", "")!r}'
-        if art.get("axes_frac"):
+        # "coords" ("data" | "axes") overrides the older axes_frac flag when set
+        crd = art.get("coords")
+        in_axes = (crd == "axes") if crd in ("data", "axes") else bool(art.get("axes_frac"))
+        if in_axes:
             base += ", transform=ax.transAxes"
-        base += f', ha={art.get("ha", "left")!r}, va={art.get("va", "bottom")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, color={art.get("color", "#000000")!r}, rotation={_num(art.get("rotation"), 0)!r})'
-        return base
+        base += f', ha={art.get("ha", "left")!r}, va={art.get("va", "bottom")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, color={art.get("color", "#000000")!r}, rotation={_num(art.get("rotation"), 0)!r}'
+        if art.get("zorder") is not None:
+            base += f', zorder={_num(art.get("zorder"), 3)!r}'
+        return base + _stroke_kw(art) + ")"
+    if t == "cell_marks":
+        return _cell_marks_code(art, ptype)
     if t == "legend":
         h = ", ".join(f'Line2D([], [], color={x.get("color", "#000")!r}, ls={x.get("ls", "-")!r}, lw={_num(x.get("lw"), 1.5)!r}, marker={x.get("marker", "")!r}, ms={_num(x.get("ms"), 0)!r})' for x in art.get("handles", []) if isinstance(x, dict))
         return f'ax.legend([{h}], {art.get("labels", [])!r}, loc={art.get("loc", "best")!r}, ncol={int(_num(art.get("ncol"), 1))!r}, frameon={art.get("frameon", True)!r}, fontsize={_num(art.get("fontsize"), 9)!r})'
@@ -545,9 +901,13 @@ def _codegen_artist(art):
                 f'arrowprops=dict(arrowstyle="->", color={art.get("color", "#000000")!r}, lw={_num(art.get("lw"), 1.2)!r}), '
                 f'color={art.get("color", "#000000")!r}, fontsize={_num(art.get("fontsize"), 10)!r}, rotation={_num(art.get("rotation"), 0)!r})')
     if t == "box":
+        # axes fractions by default; "coords": "data" places it in data units
+        # (for a heatmap: cell (r, c) of an imshow is x0=c-0.5, y0=r-0.5, w=h=1)
+        tr = "" if art.get("coords") == "data" else "transform=ax.transAxes, "
+        zo = f', zorder={_num(art.get("zorder"), 1)!r}' if art.get("zorder") is not None else ""
         return (f'ax.add_patch(Rectangle(({float(art["x0"])!r}, {float(art["y0"])!r}), {float(art["w"])!r}, {float(art["h"])!r}, '
-                f'transform=ax.transAxes, fc={art.get("fc", "none")!r}, alpha={_num(art.get("alpha"), 0.15)!r}, '
-                f'ec={art.get("ec", "#000000")!r}, lw={_num(art.get("lw"), 1.0)!r}))')
+                f'{tr}fc={art.get("fc", "none")!r}, alpha={_num(art.get("alpha"), 0.15)!r}, '
+                f'ec={art.get("ec", "#000000")!r}, lw={_num(art.get("lw"), 1.0)!r}{zo}))')
     if t == "vspan":
         return f'ax.axvspan({float(art["x0"])!r}, {float(art["x1"])!r}, color={art.get("color", "#b03a2e")!r}, alpha={_num(art.get("alpha"), 0.12)!r}, lw=0, zorder={int(_num(art.get("zorder"), 0))!r})'
     if t == "circle":
@@ -571,27 +931,39 @@ def _codegen_figartist(fa):
             return f'fig.legend([{h}], {fa.get("labels", [])!r}, bbox_to_anchor=({float(loc[0])!r}, {float(loc[1])!r}), loc="center", ncol={int(_num(fa.get("ncol"), 1))!r}, frameon={fa.get("frameon", True)!r}, fontsize={_num(fa.get("fontsize"), 10)!r})'
         return f'fig.legend([{h}], {fa.get("labels", [])!r}, loc={loc!r}, ncol={int(_num(fa.get("ncol"), 1))!r}, frameon={fa.get("frameon", True)!r}, fontsize={_num(fa.get("fontsize"), 10)!r})'
     if t == "text":
-        return f'fig.text({float(fa["x"])!r}, {float(fa["y"])!r}, {fa.get("text", "")!r}, ha={fa.get("ha", "left")!r}, va={fa.get("va", "bottom")!r}, fontsize={_num(fa.get("fontsize"), 12)!r}, color={fa.get("color", "#000000")!r}, rotation={_num(fa.get("rotation"), 0)!r})'
+        return f'fig.text({float(fa["x"])!r}, {float(fa["y"])!r}, {fa.get("text", "")!r}, ha={fa.get("ha", "left")!r}, va={fa.get("va", "bottom")!r}, fontsize={_num(fa.get("fontsize"), 12)!r}, color={fa.get("color", "#000000")!r}, rotation={_num(fa.get("rotation"), 0)!r}{_stroke_kw(fa)})'
     if t == "suptitle":
         _srot = _num(fa.get("rotation"), 0)
         _st = f'fig.suptitle({fa.get("text", "")!r}, x={_num(fa.get("x"), 0.5)!r}, y={_num(fa.get("y"), 1.0)!r}, fontsize={_num(fa.get("fontsize"), 14)!r}, color={fa.get("color", "#000000")!r})'
         if _srot:
             _st = "_st = " + _st + f"; _st.set_rotation({_srot!r})"
         return _st
+    if t == "line":
+        return (f'fig.add_artist(Line2D([{float(fa["x0"])!r}, {float(fa["x1"])!r}], [{float(fa["y0"])!r}, {float(fa["y1"])!r}], '
+                f'transform=fig.transFigure, color={fa.get("color", "#888888")!r}, ls={fa.get("ls", "-")!r}, '
+                f'lw={_num(fa.get("lw"), 1.0)!r}, alpha={_num(fa.get("alpha"), 1.0)!r}, zorder={int(_num(fa.get("zorder"), 1))!r}))')
     return f"pass  # figure artist type {t!r} not emitted"
 
 
 # --------------------------------------------------------------------------- build (exec the code) -- the preview
-def build_figure(spec, detail=True):
+def build_figure(spec, detail=True, data_dir=None):
     """Build the figure by executing the generated code. This IS the export, so the
     full-quality preview is byte-identical to the downloaded .py by construction.
     detail=False skips decorative artists (markers/bands/vlines) for a fast draft."""
+    return build_figure_full(spec, detail=detail, data_dir=data_dir)[0]
+
+
+def build_figure_full(spec, detail=True, data_dir=None):
+    """build_figure + the codegen warnings. The generated code looks for its
+    dataset next to its own __file__, so the exec places __file__ in the dataset
+    directory (DATA_DIR, or data_dir for a dataset that lives elsewhere)."""
     import matplotlib
     matplotlib.use("Agg")
-    code = codegen_canvas(spec, detail=detail)
-    ns = {"__name__": "figfoundry_generated", "__file__": os.path.abspath(__file__)}
+    code, warnings = codegen_canvas_full(spec, detail=detail)
+    ns = {"__name__": "figfoundry_generated",
+          "__file__": os.path.join(os.path.abspath(data_dir or DATA_DIR), "_figfoundry_preview.py")}
     exec(compile(code, "<figfoundry>", "exec"), ns)
-    return ns["build"]()
+    return ns["build"](), warnings
 
 
 def _is_data_axes(ax):
@@ -661,7 +1033,8 @@ def hotspots_from_fig(fig, spec):
     # (Axes-level legends from plot artists do NOT enter fig.legends in
     # matplotlib >= 3.x, so the figure-legend index below stays aligned.)
     fig_texts = [t for t in fig.texts if t is not getattr(fig, "_suptitle", None)]
-    leg_i = txt_i = 0
+    line_arts = [a for a in fig.artists if type(a).__name__ == "Line2D"]
+    leg_i = txt_i = line_i = 0
     for j, fa in enumerate(spec.get("figure_artists") or []):
         t = fa.get("type") if isinstance(fa, dict) else None
         if t == "legend":
@@ -669,11 +1042,108 @@ def hotspots_from_fig(fig, spec):
             leg_i += 1
         elif t == "suptitle":
             a = getattr(fig, "_suptitle", None)
+        elif t == "line":
+            a = line_arts[line_i] if line_i < len(line_arts) else None
+            line_i += 1
+            if a is not None:
+                # pad the thin line's hit-box vertically so it is easy to grab on the canvas
+                try:
+                    b = a.get_window_extent(rend)
+                    pad = max(8.0, b.height / 2 + 6.0)
+                    hs.append({"id": f"figartist:{j}", "x": round(b.x0 - 4, 1),
+                               "top": round(img_h - b.y1 - pad, 1),
+                               "w": round(b.width + 8, 1), "h": round(b.height + 2 * pad, 1)})
+                    continue
+                except Exception:
+                    pass
         else:
             a = fig_texts[txt_i] if txt_i < len(fig_texts) else None
             txt_i += 1
         add(f"figartist:{j}", a)
     return hs
+
+
+def _plot_axes_pairs(fig, spec):
+    """(plot spec, data Axes) pairs, aligned the same way hotspots_from_fig aligns them."""
+    axes_list = [ax for ax in fig.axes if _is_data_axes(ax)]
+    out, ax_i = [], 0
+    for p in spec.get("plots") or []:
+        if not _plot_creates_axes(p):
+            continue
+        if ax_i >= len(axes_list):
+            break
+        out.append((p, axes_list[ax_i]))
+        ax_i += 1
+    return out
+
+
+def plot_bboxes(fig, spec):
+    """Each plot's drawn geometry in figure fractions [left, bottom, width, height]
+    (bottom-origin, like rect). "axes" is the drawn axes box, which differs from the
+    spec rect under aspect='equal'; "tight" also includes tick labels, axis labels
+    and the title. Call after the figure has been drawn."""
+    rend = fig.canvas.get_renderer()
+    W, H = fig.bbox.width, fig.bbox.height
+    out = {}
+    for p, ax in _plot_axes_pairs(fig, spec):
+        pos = ax.get_position()
+        ent = {"axes": [round(float(v), 5) for v in (pos.x0, pos.y0, pos.width, pos.height)]}
+        try:
+            tb = ax.get_tightbbox(rend)
+            ent["tight"] = [round(float(v), 5) for v in (tb.x0 / W, tb.y0 / H, tb.width / W, tb.height / H)]
+        except Exception:
+            pass
+        out[str(p.get("id"))] = ent
+    return out
+
+
+def layout_warnings(fig, spec):
+    """Cheap overlap/clipping checks on a drawn figure: tick labels that run into
+    each other, and plots or texts that extend past the canvas edge."""
+    rend = fig.canvas.get_renderer()
+    fb = fig.bbox
+    tol = 1.0  # px
+    w = []
+
+    def outside(b):
+        return b.x0 < fb.x0 - tol or b.y0 < fb.y0 - tol or b.x1 > fb.x1 + tol or b.y1 > fb.y1 + tol
+
+    for p, ax in _plot_axes_pairs(fig, spec):
+        if getattr(ax, "name", "") != "rectilinear":
+            continue
+        where = f"plot {p.get('id')!r}"
+        axb = ax.get_window_extent(rend)
+        for axis_name, labels, lo, hi in (("x", ax.get_xticklabels(), 0, 2), ("y", ax.get_yticklabels(), 1, 3)):
+            boxes = []
+            for lab in labels:
+                if not lab.get_visible() or not lab.get_text().strip():
+                    continue
+                try:
+                    b = lab.get_window_extent(rend)
+                except Exception:
+                    continue
+                c = (b.x0 + b.x1) / 2 if axis_name == "x" else (b.y0 + b.y1) / 2
+                a_lo, a_hi = (axb.x0, axb.x1) if axis_name == "x" else (axb.y0, axb.y1)
+                if a_lo - tol <= c <= a_hi + tol:  # only labels of ticks inside the view
+                    boxes.append((b.extents[lo], b.extents[hi], lab.get_text()))
+            boxes.sort()
+            for (_, e0, t0), (s1, _, t1) in itertools.pairwise(boxes):
+                if e0 > s1 + 0.5:
+                    w.append(f"{where}: {axis_name} tick labels overlap ({t0!r} and {t1!r}); "
+                             f"use a smaller tick_labelsize or fewer ticks")
+                    break
+        try:
+            if outside(ax.get_tightbbox(rend)):
+                w.append(f"{where}: extends past the canvas edge (tick labels, axis labels or title are clipped)")
+        except Exception:
+            pass
+        for t in ax.texts:
+            if t.get_visible() and t.get_text().strip() and outside(t.get_window_extent(rend)):
+                w.append(f"{where}: text {t.get_text()!r} extends past the canvas edge")
+    for t in fig.texts:
+        if t.get_visible() and t.get_text().strip() and outside(t.get_window_extent(rend)):
+            w.append(f"figure text {t.get_text()!r} extends past the canvas edge")
+    return w
 
 
 # Draft = FULL detail (all markers/bands/vlines/titles/legend) at high-ish DPI + light JPEG,
@@ -688,7 +1158,7 @@ def render_to_png(spec, draft=False):
     draft=True -> lower-res JPEG (full detail) for live interaction; else full-res PNG."""
     import matplotlib.pyplot as plt
     dpi = DRAFT_DPI if draft else PREVIEW_DPI
-    fig = build_figure(spec, detail=True)  # always full detail -- never strip the figure
+    fig, warnings = build_figure_full(spec, detail=True)  # always full detail -- never strip the figure
     try:
         fig.set_dpi(dpi)
         # report size at the reference DPI so draft (low-res) and full display at the same
@@ -703,29 +1173,40 @@ def render_to_png(spec, draft=False):
         else:
             fig.canvas.draw()
             hotspots = hotspots_from_fig(fig, spec)
+            warnings = warnings + layout_warnings(fig, spec)
             fig.canvas.print_figure(buf, format="png", dpi=dpi)
             mime = "image/png"
+        bboxes = plot_bboxes(fig, spec)  # the figure has been drawn by now (draw / print_figure)
         img = base64.b64encode(buf.getvalue()).decode()
     finally:
         plt.close(fig)  # no figure leak even if a draw/save step raises
-    return {"img": img, "mime": mime, "img_w": img_w, "img_h": img_h, "hotspots": hotspots, "draft": draft, "spec": spec}
+    return {"img": img, "mime": mime, "img_w": img_w, "img_h": img_h, "hotspots": hotspots, "draft": draft,
+            "warnings": warnings, "plot_bboxes": bboxes, "spec": spec}
 
 
-def render_to_bytes(spec, fmt="png", dpi=None):
+def render_to_bytes(spec, fmt="png", dpi=None, data_dir=None):
     """Render the figure (by executing the generated code) to raw bytes.
-    fmt is one of png / svg / pdf -- svg and pdf are vector, for publication."""
+    fmt is one of png / svg / pdf -- svg and pdf are vector, for publication.
+    dpi defaults to the canvas dpi, the generated script's default --dpi, so the
+    export and a run of the script produce the same file."""
+    return render_to_bytes_full(spec, fmt=fmt, dpi=dpi, data_dir=data_dir)[0]
+
+
+def render_to_bytes_full(spec, fmt="png", dpi=None, data_dir=None):
+    """render_to_bytes + the warnings (codegen and layout)."""
     import matplotlib.pyplot as plt
-    dpi = dpi or PREVIEW_DPI
-    fig = build_figure(spec, detail=True)
+    dpi = dpi or canvas_dpi(spec)
+    fig, warnings = build_figure_full(spec, detail=True, data_dir=data_dir)
     try:
         fig.set_dpi(dpi)
         fig.canvas.draw()
+        warnings = warnings + layout_warnings(fig, spec)
         buf = io.BytesIO()
         fig.canvas.print_figure(buf, format=fmt, dpi=dpi)
         out = buf.getvalue()
     finally:
         plt.close(fig)  # no figure leak even if a draw/save step raises
-    return out
+    return out, warnings
 
 
 def get_palettes():

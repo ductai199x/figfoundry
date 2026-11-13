@@ -71,7 +71,7 @@ def _read(slug):
     if not os.path.exists(p):
         raise HTTPException(404, "canvas not found")
     try:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError) as e:  # ValueError covers json.JSONDecodeError
         raise HTTPException(500, "canvas file is corrupt") from e
@@ -97,7 +97,7 @@ def _write(slug, doc):
     with _write_lock:
         tmp = _cpath(slug) + ".tmp"
         try:
-            with open(tmp, "w") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(doc, f, indent=2)
             last = None
             for _ in range(20):
@@ -122,7 +122,7 @@ def _list_canvases():
         if not f.endswith(".json"):
             continue
         try:
-            with open(os.path.join(CANVAS_DIR, f)) as fh:
+            with open(os.path.join(CANVAS_DIR, f), encoding="utf-8") as fh:
                 doc = json.load(fh)
             out.append({"slug": f[:-5], "name": doc.get("name", "Untitled"),
                         "plots": len(doc.get("spec", {}).get("plots", [])), "updated": doc.get("updated")})
@@ -261,12 +261,17 @@ def get_canvas(slug):
 @app.put("/api/canvases/{slug}")
 def update_canvas(slug, body: UpdateCanvasBody):
     doc = _read(slug)
+    new = dict(doc)
     if body.name is not None:
-        doc["name"] = body.name
+        new["name"] = body.name
     if body.spec is not None:
-        doc["spec"] = body.spec
-    doc["updated"] = time.time()
-    _write(slug, doc)
+        new["spec"] = body.spec
+    # Snapshot the previous version first (skipped for a no-op save), so every
+    # save can be undone through /history + /restore.
+    if new.get("name") != doc.get("name") or new.get("spec") != doc.get("spec"):
+        _snapshot(slug, doc)
+    new["updated"] = time.time()
+    _write(slug, new)
     return {"ok": True}
 
 
@@ -277,6 +282,90 @@ def delete_canvas(slug):
     if os.path.exists(p):
         os.remove(p)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- canvas history
+# Every PUT that changes a canvas first copies the previous version to
+# canvases/.history/<slug>/<snapshot id>.json (the newest HISTORY_KEEP are kept).
+HISTORY_KEEP = 100
+
+
+def _hist_dir(slug):
+    return os.path.join(CANVAS_DIR, ".history", slug)
+
+
+def _snapshot(slug, doc):
+    d = _hist_dir(slug)
+    os.makedirs(d, exist_ok=True)
+    t = time.time()
+    sid = time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + f"-{int((t % 1) * 1e6):06d}"
+    while os.path.exists(os.path.join(d, sid + ".json")):  # same-microsecond saves
+        sid += "x"
+    with open(os.path.join(d, sid + ".json"), "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+    snaps = sorted(f for f in os.listdir(d) if f.endswith(".json"))
+    for old in snaps[:-HISTORY_KEEP]:
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(d, old))
+    return sid
+
+
+def _read_snapshot(slug, sid):
+    _check_slug(slug)
+    if not re.fullmatch(r"[0-9x-]+", sid):
+        raise HTTPException(404, "snapshot not found")
+    p = os.path.join(_hist_dir(slug), sid + ".json")
+    if not os.path.exists(p):
+        raise HTTPException(404, "snapshot not found")
+    try:
+        with open(p, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        raise HTTPException(500, "snapshot file is corrupt") from e
+    if not isinstance(doc, dict) or not isinstance(doc.get("spec"), dict):
+        raise HTTPException(500, "snapshot file is corrupt: missing spec")
+    return doc
+
+
+class RestoreBody(BaseModel):
+    id: str
+
+
+@app.get("/api/canvases/{slug}/history")
+def canvas_history(slug):
+    """Saved versions of a canvas, newest first (each is the state BEFORE a save)."""
+    _read(slug)
+    d = _hist_dir(slug)
+    out = []
+    if os.path.isdir(d):
+        for f in sorted((f for f in os.listdir(d) if f.endswith(".json")), reverse=True):
+            try:
+                with open(os.path.join(d, f), encoding="utf-8") as fh:
+                    doc = json.load(fh)
+                spec = doc.get("spec") or {}
+                out.append({"id": f[:-5], "name": doc.get("name"), "updated": doc.get("updated"),
+                            "plots": len(spec.get("plots") or []),
+                            "figure_artists": len(spec.get("figure_artists") or [])})
+            except Exception:
+                continue
+    return {"slug": slug, "history": out}
+
+
+@app.get("/api/canvases/{slug}/history/{sid}")
+def canvas_snapshot(slug, sid):
+    doc = _read_snapshot(slug, sid)
+    return {"slug": slug, "id": sid, "name": doc.get("name"), "updated": doc.get("updated"), "spec": doc["spec"]}
+
+
+@app.post("/api/canvases/{slug}/restore")
+def restore_canvas(slug, body: RestoreBody):
+    """Restore a snapshot. The current version is snapshotted first, so a restore
+    can itself be undone."""
+    cur = _read(slug)
+    snap = _read_snapshot(slug, body.id)
+    new_id = _snapshot(slug, cur)
+    _write(slug, {"name": snap.get("name", cur.get("name", "Untitled")), "spec": snap["spec"], "updated": time.time()})
+    return {"ok": True, "restored": body.id, "previous": new_id}
 
 
 @app.post("/api/canvases/{slug}/duplicate")
@@ -318,12 +407,12 @@ def render_canvas(slug, body: CanvasBody | None = None):
 @app.get("/api/canvases/{slug}/code")
 def code_canvas(slug):
     try:
-        code = canvas.codegen_canvas(_read(slug)["spec"])
+        code, warnings = canvas.codegen_canvas_full(_read(slug)["spec"])
     except HTTPException:
         raise  # _read's 404/500 must not be re-wrapped as a codegen failure
     except Exception as e:
         raise HTTPException(400, f"codegen failed: {e}") from e
-    return JSONResponse({"code": code})
+    return JSONResponse({"code": code, "warnings": warnings})
 
 
 @app.get("/api/canvases/{slug}/download")
@@ -341,7 +430,7 @@ def download_canvas(slug):
     base = str(doc.get("name") or "canvas").strip().replace(" ", "_") or "canvas"
     fname = re.sub(r"[^A-Za-z0-9._-]", "_", base) + ".py"
     path = os.path.join(OUT_DIR, f"canvas_{slug}.py")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(code)
     return FileResponse(path, filename=fname, media_type="text/x-python")
 
@@ -357,7 +446,7 @@ def export_figure(slug, format: str = "png"):
         raise HTTPException(400, "format must be png, svg, or pdf")
     doc = _read(slug)
     try:
-        data = canvas.render_to_bytes(doc["spec"], fmt=format)
+        data, warnings = canvas.render_to_bytes_full(doc["spec"], fmt=format)
     except HTTPException:
         raise
     except Exception as e:
@@ -366,8 +455,11 @@ def export_figure(slug, format: str = "png"):
     # The canvas name is client-controlled; keep the hand-built header value to
     # filename-safe characters so a quote/newline can't break Content-Disposition.
     fname = re.sub(r"[^A-Za-z0-9._-]", "_", base) + "." + format
+    # Warnings ride along as an ASCII-safe JSON header (the body is the figure).
     return Response(content=data, media_type=_FIG_CT[format],
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                             "X-Figfoundry-Warnings": json.dumps(warnings, ensure_ascii=True),
+                             "X-Figfoundry-Dpi": str(canvas.canvas_dpi(doc["spec"]))})
 
 
 @app.get("/api/palettes")

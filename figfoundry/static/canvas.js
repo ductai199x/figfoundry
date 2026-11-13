@@ -49,7 +49,20 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 function getPath(o, path) { return path.reduce((a, k) => (a == null ? a : a[k]), o); }
 function setPath(o, path, val) { let a = o; for (let i = 0; i < path.length - 1; i++) a = a[path[i]]; a[path[path.length - 1]] = val; }
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+// A text artist is placed in panel fractions when coords === "axes", or (no coords) when axes_frac is set.
+const textInAxes = (a) => (a.coords === "axes" || a.coords === "data") ? a.coords === "axes" : !!a.axes_frac;
 const r4 = (x) => Math.round(x * 10000) / 10000;
+// Canvas-size reference so plots can keep a fixed physical (inch) size when the
+// canvas is resized: rect is a figure-fraction, so on a canvas W/H change we
+// rescale each plot's rect w/h by the inverse ratio to hold its inch size.
+let _cvW = null, _cvH = null;
+function syncCanvasRef() { _cvW = state.spec.canvas.width; _cvH = state.spec.canvas.height; }
+function preservePlotSize() {
+  const c = state.spec.canvas;
+  if (_cvW != null && c.width !== _cvW) { const r = _cvW / c.width; for (const p of state.spec.plots) p.rect[2] = r4(p.rect[2] * r); }
+  if (_cvH != null && c.height !== _cvH) { const r = _cvH / c.height; for (const p of state.spec.plots) p.rect[3] = r4(p.rect[3] * r); }
+  _cvW = c.width; _cvH = c.height;
+}
 
 /* ---------------- coordinate model: rect=[left,bottom,w,h] (figure frac, bottom-origin) ---------------- */
 function rectToCss(rect) {
@@ -119,7 +132,11 @@ function applyRender() {
     buildLayers();
     const oc = offCanvasCount();
     const hint = $("#canvasHint");
-    if (hint) hint.innerHTML = oc
+    const warns = Array.isArray(r.warnings) ? r.warnings : [];
+    if (hint) hint.title = warns.join("\n");
+    if (hint) hint.innerHTML = warns.length
+      ? `<b style="color:var(--danger)">&#9888; ${warns.length} warning${warns.length > 1 ? "s" : ""}</b> &mdash; ${escHtml(warns[0])}${warns.length > 1 ? " (hover for all)" : ""}`
+      : oc
       ? `<b style="color:var(--danger)">${oc} element${oc > 1 ? "s" : ""} off the canvas</b> &mdash; select it in Layers and drag it back, or enlarge the canvas`
       : "Drag a signal to add a plot &nbsp;&middot;&nbsp; Drag to move, handles to resize (snaps) &nbsp;&middot;&nbsp; Shift+click to multi-select &nbsp;&middot;&nbsp; Arrows to nudge (Shift = bigger) &nbsp;&middot;&nbsp; Drag empty space / space+drag to pan";
     const ae = document.activeElement;
@@ -130,6 +147,7 @@ function applyRender() {
     showErrBanner(err);
   }
 }
+function escHtml(t) { return String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 function showErrBanner(err) {
   let b = document.getElementById("errBanner");
   if (!b) { b = document.createElement("div"); b.id = "errBanner"; document.body.appendChild(b); }
@@ -216,6 +234,7 @@ function buildOverlays() {
     div.style.width = (h.w / r.img_w * 100) + "%"; div.style.height = (h.h / r.img_h * 100) + "%";
     makeMovable(div, h.id, "mov");
     if (isCanvasMovable(h.id) && rotTarget(h.id)) addRotHandle(div, h.id);
+    if (h.id.startsWith("figartist:")) { const fa = state.spec.figure_artists[+h.id.slice(10)]; if (fa && fa.type === "line") addLineHandles(fa, +h.id.slice(10)); }
     overlay.appendChild(div);
   }
   refreshSelection();
@@ -227,7 +246,7 @@ function isCanvasMovable(id) {
     const parts = id.split(":"); const pid = parts[1], j = +parts[2];
     const p = state.spec.plots.find((x) => x.id === pid);
     const art = p && p.artists[j];
-    return art && art.type === "text" && art.axes_frac;
+    return art && art.type === "text" && textInAxes(art);
   }
   return false;
 }
@@ -270,6 +289,7 @@ function addRotHandle(movDiv, id) {
 function refreshSelection() {
   overlay.querySelectorAll(".plotbox").forEach((d) => d.classList.toggle("selected", state.selection.has("plot:" + d.dataset.pid)));
   overlay.querySelectorAll(".mov").forEach((d) => d.classList.toggle("selected", state.selection.has(d.dataset.id)));
+  overlay.querySelectorAll(".line-handle").forEach((h) => h.classList.toggle("show", state.selection.has(h.dataset.for)));
   document.querySelectorAll(".layer").forEach((l) => l.classList.toggle("active", l.dataset.id && state.selection.has(l.dataset.id)));
   drawGroupBox();
 }
@@ -404,15 +424,58 @@ function commitArtDrag(id, dxF, dyF) {
   } else if (id.startsWith("artist:")) {
     const parts = id.split(":"); const pid = parts[1], j = +parts[2];
     const p = r.plots.find((x) => x.id === pid); const a = p && p.artists[j];
-    if (a && a.type === "text" && a.axes_frac) {
+    if (a && a.type === "text" && textInAxes(a)) {
       a.x = r4(clamp(a.x + dxF / p.rect[2], -0.6, 1.6));
       a.y = r4(clamp(a.y + dyF / p.rect[3], -0.6, 1.6));
     }
   } else if (id.startsWith("figartist:")) {
     const j = +id.slice(10); const fa = r.figure_artists[j];
-    if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dxF, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dyF, -0.2, 1.2)); }
+    if (fa.type === "line") {
+      fa.x0 = r4(clamp(fa.x0 + dxF, -0.2, 1.2)); fa.y0 = r4(clamp(fa.y0 + dyF, -0.2, 1.2));
+      fa.x1 = r4(clamp(fa.x1 + dxF, -0.2, 1.2)); fa.y1 = r4(clamp(fa.y1 + dyF, -0.2, 1.2));
+    } else if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dxF, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dyF, -0.2, 1.2)); }
     else { fa.x = r4(clamp((fa.x || 0) + dxF, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dyF, -0.1, 1.1)); }
   }
+}
+
+function addLineHandles(fa, j) {
+  [["x0","y0"],["x1","y1"]].forEach(([px, py]) => {
+    const h = document.createElement("div");
+    h.className = "line-handle";
+    h.dataset.for = "figartist:" + j;
+    h.title = "Drag to move this endpoint";
+    h.style.left = (fa[px] * 100) + "%";
+    h.style.top = ((1 - fa[py]) * 100) + "%";
+    h.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      h.setPointerCapture(e.pointerId);
+      const sx = e.clientX, sy = e.clientY;
+      if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec);
+      let moved = false;
+      const onMove = (ev) => {
+        if (!moved && Math.abs(ev.clientX - sx) < 3 && Math.abs(ev.clientY - sy) < 3) return;
+        moved = true;
+        const F = toFig(ev.clientX, ev.clientY);
+        fa[px] = r4(clamp(F.fx, -0.2, 1.2));
+        fa[py] = r4(clamp(1 - F.fyTop, -0.2, 1.2));
+        h.style.left = (fa[px] * 100) + "%";
+        h.style.top = ((1 - fa[py]) * 100) + "%";
+        scheduleDraft();
+      };
+      const onUp = (ev) => {
+        try { h.releasePointerCapture(ev.pointerId); } catch (_) {}
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        document.removeEventListener("pointercancel", onUp);
+        commitSnapshot(); commit();
+      };
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+      document.addEventListener("pointercancel", onUp);
+    });
+    overlay.appendChild(h);
+  });
 }
 
 /* ---------------- selection / history / persist ---------------- */
@@ -431,8 +494,8 @@ function pushHist() { state.history.push(clone(state.spec)); if (state.history.l
 // Same as pushHist but for controls that snapshot on first `input` and commit on `change`
 // (sliders/text/num/color). Keeps the 60-entry cap, which the inline push used to skip.
 function commitSnapshot() { if (state.sliderSnapshot === null) return; state.history.push(state.sliderSnapshot); if (state.history.length > 60) state.history.shift(); state.future = []; state.sliderSnapshot = null; updateHist(); }
-function undo() { if (!state.history.length) return; state.future.push(clone(state.spec)); state.spec = state.history.pop(); state.sliderSnapshot = null; updateHist(); commit(); }
-function redo() { if (!state.future.length) return; state.history.push(clone(state.spec)); state.spec = state.future.pop(); state.sliderSnapshot = null; updateHist(); commit(); }
+function undo() { if (!state.history.length) return; state.future.push(clone(state.spec)); state.spec = state.history.pop(); state.sliderSnapshot = null; syncCanvasRef(); updateHist(); commit(); }
+function redo() { if (!state.future.length) return; state.history.push(clone(state.spec)); state.spec = state.future.pop(); state.sliderSnapshot = null; syncCanvasRef(); updateHist(); commit(); }
 function updateHist() { $("#undoBtn").disabled = !state.history.length; $("#redoBtn").disabled = !state.future.length; }
 async function commit() {
   try { await api(`/api/canvases/${state.slug}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: state.spec }) }); }
@@ -496,12 +559,13 @@ function nudgeOne(id, dx, dy) {
   const [kind, pid, j] = id.split(":");
   if (kind === "plot") { const p = state.spec.plots.find((x) => x.id === pid); if (p) { p.rect[0] = clamp(r4(p.rect[0] + dx), 0, 1); p.rect[1] = clamp(r4(p.rect[1] + dy), 0, 1); } }
   else if (kind === "title") { const p = state.spec.plots.find((x) => x.id === pid); const t = p && p.title; if (t) { t.x = r4(clamp(t.x + dx / p.rect[2], -0.6, 1.6)); t.y = r4(clamp(t.y + dy / p.rect[3], -0.6, 1.6)); t.visible = true; } }
-  else if (kind === "figartist") { const fa = state.spec.figure_artists[+pid]; if (fa) { if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dx, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dy, -0.2, 1.2)); } else { fa.x = r4(clamp((fa.x || 0) + dx, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dy, -0.1, 1.1)); } } }
+  else if (kind === "figartist") { const fa = state.spec.figure_artists[+pid]; if (fa) { if (fa.type === "line") { fa.x0 = r4(clamp(fa.x0 + dx, -0.2, 1.2)); fa.y0 = r4(clamp(fa.y0 + dy, -0.2, 1.2)); fa.x1 = r4(clamp(fa.x1 + dx, -0.2, 1.2)); fa.y1 = r4(clamp(fa.y1 + dy, -0.2, 1.2)); } else if (fa.loc) { fa.loc[0] = r4(clamp(fa.loc[0] + dx, 0, 1.2)); fa.loc[1] = r4(clamp(fa.loc[1] + dy, -0.2, 1.2)); } else { fa.x = r4(clamp((fa.x || 0) + dx, -0.1, 1.1)); fa.y = r4(clamp((fa.y || 0) + dy, -0.1, 1.1)); } } }
   else if (kind === "artist") { const p = state.spec.plots.find((x) => x.id === pid); const a = p && p.artists[j]; if (a) {
-    if (a.type === "text" && a.axes_frac) { a.x = r4(clamp(a.x + dx / p.rect[2], -0.6, 1.6)); a.y = r4(clamp(a.y + dy / p.rect[3], -0.6, 1.6)); }
+    if (a.type === "text" && textInAxes(a)) { a.x = r4(clamp(a.x + dx / p.rect[2], -0.6, 1.6)); a.y = r4(clamp(a.y + dy / p.rect[3], -0.6, 1.6)); }
     else if (a.type === "vline") a.x = r4(a.x + dx * 8);
     else if (a.type === "hline") a.y = r4(a.y + dy * 8);
     else if (a.type === "circle" || a.type === "ellipse") { a.x = r4(a.x + dx * 8); a.y = r4(a.y + dy * 8); }
+    else if (a.type === "box" && a.coords === "data") { a.x0 = r4(a.x0 + dx * 8); a.y0 = r4(a.y0 + dy * 8); }
     else if (a.type === "box") { a.x0 = r4(clamp(a.x0 + dx, -0.2, 1.2)); a.y0 = r4(clamp(a.y0 + dy, -0.2, 1.2)); }
     else if (a.type === "vspan") { a.x0 = r4(a.x0 + dx * 8); a.x1 = r4(a.x1 + dx * 8); }
     else if (a.type === "annotation") { a.xytext = [r4(a.xytext[0] + dx), r4(a.xytext[1] + dy)]; }
@@ -770,8 +834,8 @@ function buildInspector() {
 function buildCanvasInspector(body) {
   const c = state.spec.canvas;
   body.appendChild(ctlHead("Canvas"));
-  body.appendChild(slider("Width (in)", ["canvas", "width"], c.width, 3, 14, 0.05));
-  body.appendChild(slider("Height (in)", ["canvas", "height"], c.height, 1, 12, 0.05));
+  body.appendChild(slider("Width (in)", ["canvas", "width"], c.width, 3, 14, 0.05, preservePlotSize));
+  body.appendChild(slider("Height (in)", ["canvas", "height"], c.height, 1, 12, 0.05, preservePlotSize));
   body.appendChild(slider("Export DPI", ["canvas", "dpi"], c.dpi, 100, 400, 10));
   body.appendChild(color("Background", ["canvas", "bg"], c.bg));
   body.appendChild(buildLayoutSection());
@@ -863,6 +927,7 @@ function buildFigureElementsSection() {
     ["+ Legend", () => ({ type: "legend", handles: [{ color: "#b03a2e", lw: 1.6, marker: "o", ms: 3 }], labels: ["series"], loc: [0.5, 1.0], ncol: 2, frameon: false, fontsize: 12 })],
     ["+ Suptitle", () => ({ type: "suptitle", text: "Title", x: 0.5, y: 1.0, fontsize: 16, color: "#000" })],
     ["+ Text", () => ({ type: "text", x: 0.5, y: 0.5, text: "note", ha: "center", va: "center", fontsize: 12, color: "#333" })],
+    ["+ Line", () => ({ type: "line", x0: 0.15, y0: 0.5, x1: 0.85, y1: 0.5, color: "#888888", lw: 1.0 })],
   ]) {
     const b = document.createElement("button"); b.className = "pill"; b.textContent = label;
     b.onclick = () => { pushHist(); state.spec.figure_artists.push(mk()); select("figartist:" + (state.spec.figure_artists.length - 1)); commit(); };
@@ -999,6 +1064,12 @@ function buildPlotInspector(body, pid) {
   if (COLORMAP_TYPES.has(t)) {
     body.appendChild(selControl("Colormap", ["plots", idx(pid), "style", "cmap"], p.style.cmap || "viridis", CMAPS));
     body.appendChild(check("Show colorbar", ["plots", idx(pid), "style", "colorbar"], !!p.style.colorbar));
+    // imshow defaults to square cells; contour/pcolormesh default to filling the panel
+    if (["imshow","pcolormesh","contourf","contour"].includes(t)) body.appendChild(selControl("Aspect", ["plots", idx(pid), "style", "aspect"], p.style.aspect || (t === "imshow" ? "equal" : "auto"), [["equal","equal (square)"],["auto","auto (fill)"]]));
+    if (["imshow","pcolormesh","contourf","contour","hexbin","hist2d","scatter-grouped"].includes(t)) {
+      body.appendChild(numPair("Color range vmin – vmax (blank = auto)", ["plots", idx(pid), "style"], "vmin", "vmax", p.style.vmin, p.style.vmax));
+      body.appendChild(selControl("Color scale", ["plots", idx(pid), "style", "norm"], p.style.norm || "linear", [["linear","linear"],["log","log"],["symlog","symlog"]]));
+    }
   }
   if (t === "line" || t === "step") body.appendChild(slider("Line width", ["plots", idx(pid), "style", "lw"], p.style.lw, 0.2, 5, 0.1));
   if (t === "scatter" || t === "scatter-grouped" || t === "decision-boundary") body.appendChild(slider("Marker size", ["plots", idx(pid), "style", "ms"], p.style.ms, 0, 8, 0.2));
@@ -1011,8 +1082,8 @@ function buildPlotInspector(body, pid) {
   }
   if (p.data.band) body.appendChild(slider("Band opacity", ["plots", idx(pid), "style", "band_alpha"], p.style.band_alpha, 0, 0.6, 0.01));
   body.appendChild(ctlHead("Axes"));
-  body.appendChild(ticksText("X ticks (blank = auto)", ["plots", idx(pid), "axes", "xticks"], p.axes.xticks));
-  body.appendChild(ticksText("Y ticks (blank = auto)", ["plots", idx(pid), "axes", "yticks"], p.axes.yticks));
+  body.appendChild(ticksText("X ticks (blank = auto, none = hide)", ["plots", idx(pid), "axes", "xticks"], p.axes.xticks));
+  body.appendChild(ticksText("Y ticks (blank = auto, none = hide)", ["plots", idx(pid), "axes", "yticks"], p.axes.yticks));
   body.appendChild(labelsText("X tick labels (blank = auto)", ["plots", idx(pid), "axes", "xticklabels"], p.axes.xticklabels));
   body.appendChild(labelsText("Y tick labels (blank = auto)", ["plots", idx(pid), "axes", "yticklabels"], p.axes.yticklabels));
   body.appendChild(text("X label", ["plots", idx(pid), "axes", "xlabel"], p.axes.xlabel, true));
@@ -1023,6 +1094,7 @@ function buildPlotInspector(body, pid) {
   body.appendChild(num2("X range (blank = auto)", ["plots", idx(pid), "axes", "xlim"], p.axes.xlim));
   body.appendChild(num2("Y range (blank = auto)", ["plots", idx(pid), "axes", "ylim"], p.axes.ylim));
   body.appendChild(slider("Tick label size", ["plots", idx(pid), "axes", "tick_labelsize"], p.axes.tick_labelsize, 6, 24, 0.5));
+  body.appendChild(slider("Axis label size (0=default)", ["plots", idx(pid), "axes", "label_fontsize"], p.axes.label_fontsize ?? 0, 0, 24, 0.5));
   body.appendChild(ctlHead("Spines"));
   const sp = p.axes.spines;
   const row = document.createElement("div"); row.className = "two";
@@ -1033,6 +1105,15 @@ function buildPlotInspector(body, pid) {
   body.appendChild(row);
   body.appendChild(check("Show x tick labels", ["plots", idx(pid), "axes", "labelbottom"], p.axes.labelbottom));
   body.appendChild(check("Show y tick labels", ["plots", idx(pid), "axes", "labelleft"], p.axes.labelleft));
+  body.appendChild(ctlHead("Tick marks"));
+  if (!p.axes.tick_params || typeof p.axes.tick_params !== "object") p.axes.tick_params = {};
+  const tp = p.axes.tick_params;
+  const trow = document.createElement("div"); trow.className = "two";
+  trow.append(checkInline("x ticks", ["plots", idx(pid), "axes", "tick_params", "bottom"], tp.bottom ?? true));
+  trow.append(checkInline("y ticks", ["plots", idx(pid), "axes", "tick_params", "left"], tp.left ?? true));
+  body.appendChild(trow);
+  body.appendChild(slider("Tick length (pt)", ["plots", idx(pid), "axes", "tick_params", "length"], tp.length ?? 3.5, 0, 12, 0.5));
+  body.appendChild(selControl("Tick direction", ["plots", idx(pid), "axes", "tick_params", "direction"], tp.direction || "out", [["out","out"],["in","in"],["inout","in + out"]]));
   body.appendChild(ctlHead("Title"));
   body.appendChild(check("Show title", ["plots", idx(pid), "title", "visible"], p.title.visible));
   body.appendChild(text("Title text", ["plots", idx(pid), "title", "text"], p.title.text, true));
@@ -1064,7 +1145,7 @@ function buildArtistInspector(body, pid, j) {
   const P = (k, v, mn, mx, st) => ["plots", idx(pid), "artists", j, k];
   if (a.type === "vline") { body.appendChild(slider("X value", P("x", a.x), 0, 20, 0.5, null, true)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["dashdot", "Dash dot"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); body.appendChild(slider("Opacity", P("alpha"), a.alpha ?? 1, 0, 1, 0.05)); }
   else if (a.type === "hline") { body.appendChild(slider("Y value", P("y", a.y), -1, 1, 0.05, null, true)); body.appendChild(color("Color", P("color"), a.color)); body.appendChild(selControl("Style", P("ls"), a.ls || "-", [["-", "Solid"], ["dotted", "Dotted"], ["dashed", "Dashed"]])); body.appendChild(slider("Width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1)); }
-  else if (a.type === "text") { body.appendChild(text("Text", P("text"), a.text, true)); body.appendChild(slider("X", P("x"), a.x, -1, 2, 0.02)); body.appendChild(slider("Y", P("y"), a.y, -1, 2, 0.02)); body.appendChild(check("Use panel fraction", P("axes_frac"), !!a.axes_frac)); body.appendChild(slider("Size", P("fontsize"), a.fontsize ?? 10, 6, 24, 0.5)); body.appendChild(slider("Rotation (deg)", P("rotation"), a.rotation ?? 0, -180, 180, 1)); body.appendChild(color("Color", P("color"), a.color || "#000")); }
+  else if (a.type === "text") { body.appendChild(text("Text", P("text"), a.text, true)); body.appendChild(slider("X", P("x"), a.x, -1, 2, 0.02)); body.appendChild(slider("Y", P("y"), a.y, -1, 2, 0.02)); body.appendChild(selControl("Coordinates", P("coords"), textInAxes(a) ? "axes" : "data", [["axes", "panel fraction (0-1)"], ["data", "data units"]])); body.appendChild(slider("Size", P("fontsize"), a.fontsize ?? 10, 6, 24, 0.5)); body.appendChild(slider("Rotation (deg)", P("rotation"), a.rotation ?? 0, -180, 180, 1)); body.appendChild(color("Color", P("color"), a.color || "#000")); }
   else if (a.type === "annotation") {
     body.appendChild(text("Text", P("text"), a.text, true));
     body.appendChild(num2("Arrow points to (data x, y)", P("xy"), a.xy));
@@ -1075,10 +1156,18 @@ function buildArtistInspector(body, pid, j) {
     body.appendChild(color("Color", P("color"), a.color || "#000"));
   }
   else if (a.type === "box") {
+    body.appendChild(selControl("Coordinates", P("coords"), a.coords === "data" ? "data" : "axes", [["axes", "panel fraction (0-1)"], ["data", "data units (heatmap cell = 1)"]]));
+    if (a.coords === "data") {
+      body.appendChild(slider("X (data)", P("x0"), a.x0, -1, 20, 0.5, null, true));
+      body.appendChild(slider("Y (data)", P("y0"), a.y0, -1, 20, 0.5, null, true));
+      body.appendChild(slider("Width (data)", P("w"), a.w, 0.1, 20, 0.1, null, true));
+      body.appendChild(slider("Height (data)", P("h"), a.h, 0.1, 20, 0.1, null, true));
+    } else {
     body.appendChild(slider("X (0-1 of panel)", P("x0"), a.x0, 0, 1, 0.01));
     body.appendChild(slider("Y (0-1 of panel)", P("y0"), a.y0, 0, 1, 0.01));
     body.appendChild(slider("Width", P("w"), a.w, 0.02, 1, 0.01));
     body.appendChild(slider("Height", P("h"), a.h, 0.02, 1, 0.01));
+    }
     body.appendChild(color("Fill", P("fc"), a.fc || "#ffd166"));
     body.appendChild(slider("Fill opacity (0 = none)", P("alpha"), a.alpha ?? 0.15, 0, 1, 0.02));
     body.appendChild(color("Edge", P("ec"), a.ec || "#000"));
@@ -1129,6 +1218,14 @@ function buildArtistInspector(body, pid, j) {
     const addPt = document.createElement("button"); addPt.className = "pill"; addPt.textContent = "+ Point";
     addPt.onclick = () => { pushHist(); pts.push([5, 5]); a.points = pts.slice(); select("artist:" + pid + ":" + j); commit(); };
     body.appendChild(plist); body.appendChild(addPt);
+  }
+  else if (a.type === "cell_marks") {
+    body.appendChild(cellsText("Cells (row, col; row, col; ...)", P("cells"), a.cells));
+    body.appendChild(selControl("Marker", P("marker"), a.marker || "box", [["box", "box"], ["x", "x (cross)"], ["dot", "dot"]]));
+    body.appendChild(color("Color", P("color"), a.color || "#000000"));
+    body.appendChild(slider("Line width", P("lw"), a.lw ?? 1, 0.2, 4, 0.1));
+    body.appendChild(slider("Inset (fraction of cell)", P("inset"), a.inset ?? 0.08, 0, 0.45, 0.01));
+    body.appendChild(slider("Opacity", P("alpha"), a.alpha ?? 1, 0, 1, 0.05));
   }
   else if (a.type === "arrow") {
     body.appendChild(slider("From X", P("x0"), a.x0, -10, 20, 0.2, null, true));
@@ -1190,6 +1287,13 @@ function buildFigartistInspector(body, j) {
     body.appendChild(slider("Size (pt)", P("fontsize"), fa.fontsize ?? 14, 6, 26, 0.5));
     body.appendChild(slider("Rotation (deg)", P("rotation"), fa.rotation ?? 0, -180, 180, 1));
     body.appendChild(color("Color", P("color"), fa.color || "#000"));
+  } else if (fa.type === "line") {
+    body.appendChild(slider("X0", P("x0"), fa.x0 ?? 0, -0.2, 1.2, 0.01));
+    body.appendChild(slider("Y0", P("y0"), fa.y0 ?? 0, -0.2, 1.2, 0.01));
+    body.appendChild(slider("X1", P("x1"), fa.x1 ?? 1, -0.2, 1.2, 0.01));
+    body.appendChild(slider("Y1", P("y1"), fa.y1 ?? 1, -0.2, 1.2, 0.01));
+    body.appendChild(slider("Width (pt)", P("lw"), fa.lw ?? 1.0, 0.5, 4, 0.1));
+    body.appendChild(color("Color", P("color"), fa.color || "#888888"));
   }
   body.appendChild(ctlHead(""));
   const del = document.createElement("button"); del.className = "pill danger"; del.textContent = "Remove";
@@ -1257,10 +1361,39 @@ function buildArtistList(body, pid) {
     b.onclick = () => { pushHist(); p.artists.push(mk()); select(`artist:${pid}:${p.artists.length - 1}`); commit(); };
     add.appendChild(b);
   }
+  if (["imshow", "pcolormesh"].includes(p.type)) {
+    const b = document.createElement("button"); b.className = "pill"; b.textContent = "+ cells";
+    b.title = "Mark heatmap cells (box / x / dot) in data coordinates";
+    b.onclick = () => { pushHist(); p.artists.push({ type: "cell_marks", cells: [[0, 0]], marker: "box", color: "#1f1f1f", lw: 1.2, inset: 0.08 }); select(`artist:${pid}:${p.artists.length - 1}`); commit(); };
+    add.appendChild(b);
+  }
   body.appendChild(add);
 }
 
 /* ---------------- control builders ---------------- */
+// Two optional numbers stored as separate keys of one object (e.g. style.vmin / style.vmax).
+function numPair(label, objPath, ka, kb, va, vb) {
+  const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
+  const row = document.createElement("div"); row.className = "num-row";
+  const a = document.createElement("input"), b = document.createElement("input"), sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "–"; a.type = b.type = "text"; a.placeholder = "auto"; b.placeholder = "auto";
+  a.value = va ?? ""; b.value = vb ?? "";
+  const put = (inp, k) => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); const o = getPath(state.spec, objPath); const x = parseFloat(inp.value); if (inp.value.trim() === "" || isNaN(x)) delete o[k]; else o[k] = x; scheduleDraft(); };
+  a.addEventListener("input", () => put(a, ka)); b.addEventListener("input", () => put(b, kb));
+  a.addEventListener("change", () => { commitSnapshot(); commit(); }); b.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(a); wireEscRevert(b);
+  row.append(a, sep, b); w.appendChild(row); return w;
+}
+// Heatmap cell list "r, c; r, c" <-> [[r, c], [r, c]].
+function cellsText(label, path, val) {
+  const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
+  const inp = document.createElement("input"); inp.type = "text"; inp.spellcheck = false; inp.placeholder = "e.g. 0, 2; 3, 5";
+  inp.value = Array.isArray(val) ? val.map((rc) => rc.join(", ")).join("; ") : "";
+  const parse = () => inp.value.split(";").map((t) => t.split(",").map((x) => parseInt(x.trim(), 10))).filter((rc) => rc.length === 2 && rc.every((n) => !isNaN(n)));
+  inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
+  inp.addEventListener("change", () => { commitSnapshot(); commit(); });
+  wireEscRevert(inp);
+  w.appendChild(inp); return w;
+}
 function ctlHead(t) { const h = document.createElement("div"); h.className = "section"; h.textContent = t; return h; }
 function hint(t) { const h = document.createElement("div"); h.className = "hint"; h.innerHTML = t; return h; }
 function slider(label, path, val, min, max, step, afterChange, noClamp) {
@@ -1323,8 +1456,8 @@ function text(label, path, val, multiline) {
 }
 function ticksText(label, path, val) {
   const w = document.createElement("div"); w.className = "ctl"; const head = document.createElement("div"); head.className = "ctl-head"; const lab = document.createElement("label"); lab.textContent = label; head.appendChild(lab); w.appendChild(head);
-  const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? val.join(", ") : ""; inp.placeholder = "e.g. 0, 5, 10";
-  const parse = () => { const t = inp.value.trim(); return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
+  const inp = document.createElement("input"); inp.type = "text"; inp.value = Array.isArray(val) ? (val.length ? val.join(", ") : "none") : ""; inp.placeholder = "e.g. 0, 5, 10  (none = hide)";
+  const parse = () => { const t = inp.value.trim(); if (/^none$/i.test(t)) return []; return t ? t.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)) : "auto"; };
   inp.addEventListener("input", () => { if (state.sliderSnapshot === null) state.sliderSnapshot = clone(state.spec); setPath(state.spec, path, parse()); scheduleDraft(); });
   inp.addEventListener("change", () => { commitSnapshot(); commit(); });
   wireEscRevert(inp);
@@ -1553,6 +1686,7 @@ async function boot() {
   state.name = doc.name;
   document.title = "Fig Foundry — " + state.name;
   state.spec = doc.spec;
+  syncCanvasRef();
   state.dataset = doc.spec.dataset || null;
   let sigRes;
   try {

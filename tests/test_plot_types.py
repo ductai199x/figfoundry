@@ -2,6 +2,7 @@
 and vector formats (svg/pdf) come out with the right magic bytes."""
 import hashlib
 import io
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pytest
@@ -59,7 +60,7 @@ def test_wysiwyg_per_type(data_dir, tmp_path, ptype, refs):
         p["data"]["field"] = refs["field"]
     spec["plots"] = [p]
     m_preview = _md5(canvas.build_figure(spec))
-    out = tmp_path / "export.py"
+    out = Path(canvas.DATA_DIR) / "export.py"  # next to the dataset, as a user would
     out.write_text(canvas.codegen_canvas(spec), encoding="utf-8")
     ns = {"__file__": str(out)}
     exec(compile(out.read_text(encoding="utf-8"), str(out), "exec"), ns)
@@ -74,7 +75,7 @@ def test_line_index_based(data_dir, tmp_path):
     p["type"] = "line"
     spec["plots"] = [p]
     m1 = _md5(canvas.build_figure(spec))
-    out = tmp_path / "e.py"
+    out = Path(canvas.DATA_DIR) / "e.py"
     out.write_text(canvas.codegen_canvas(spec), encoding="utf-8")
     ns = {"__file__": str(out)}
     exec(compile(out.read_text(encoding="utf-8"), str(out), "exec"), ns)

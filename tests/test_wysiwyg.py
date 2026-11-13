@@ -2,6 +2,7 @@
 so they must produce byte-identical figures."""
 import hashlib
 import io
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 
@@ -46,7 +47,7 @@ def test_preview_matches_export(data_dir, tmp_path):
     spec = _spec()
     m_preview = _md5(canvas.build_figure(spec))
 
-    out = tmp_path / "export.py"
+    out = Path(canvas.DATA_DIR) / "export.py"  # next to the dataset, as a user would
     out.write_text(canvas.codegen_canvas(spec), encoding="utf-8")
     ns = {"__file__": str(out)}
     exec(compile(out.read_text(encoding="utf-8"), str(out), "exec"), ns)

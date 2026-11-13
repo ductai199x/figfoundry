@@ -1,7 +1,8 @@
 """API-layer tests via FastAPI TestClient: slug validation, canvas lifecycle
 (create/duplicate/delete), render/code/figure endpoints, palettes, and dataset
-list/signals/upload. Canvas tests use the real user dir, so any canvas created is
-deleted again; dataset tests run against a throwaway data dir (data_dir fixture)."""
+list/signals/upload, warnings, and canvas history. Every test runs against
+throwaway canvases/out/datasets dirs (conftest's autouse _isolated_user_dir), so
+nothing touches the real ~/.figfoundry."""
 import io
 
 import pytest
