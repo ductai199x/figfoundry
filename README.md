@@ -122,7 +122,7 @@ security probes.
 | | |
 |---|---|
 | Plot types, each verified preview-identical to its export | **23 of 23** ([tests](tests/test_plot_types.py)) |
-| Tests, passing on Linux and Windows, Python 3.10 and 3.12 | **153** ([CI](https://github.com/ductai199x/figfoundry/actions)) |
+| Tests, passing on Linux and Windows, Python 3.10 and 3.12 | **218** ([CI](https://github.com/ductai199x/figfoundry/actions)) |
 | Malicious pickle payloads the whitelist refuses to load | **18**, including `np.fromfile`, `np.load`, `__import__`, `eval`, `exec` ([tests](tests/test_data_app.py)) |
 | Separate renderers the export can drift from | **0** — the preview executes the export |
 
@@ -144,7 +144,9 @@ security probes.
 - **Styles every element.** Per plot: the data, plot type, color, line and marker, σ-band and
   error bars, ticks and tick labels, limits and scale, spines, title, colormap and colorbar,
   and artists — vertical and horizontal lines, text, annotations, arrows, boxes, circles,
-  ellipses, polygons and legends. Figure-level axis labels, legend, suptitle and free text.
+  ellipses, polygons, legends and heatmap cell markers (box / x / dot, in data coordinates).
+  Figure-level axis labels, legend, suptitle, free text and lines. Color ranges
+  (`vmin`/`vmax`/`norm`), image aspect, tick marks and axis-label size are all controls.
 - **Suggests accessible color.** One click applies the colorblind-safe Okabe–Ito palette to a
   plot's series; a palette menu (Okabe–Ito, Bright, Viridis, Plasma, Cividis) is available
   through the API.
@@ -155,9 +157,15 @@ security probes.
 - **Lays out for you.** Arrange in a grid, align and distribute (just a selection, or all
   plots), set margins and gaps, sync axis ranges, and rotate any text, title or label by
   dragging its handle or typing the degrees.
-- **Exports clean code.** The figure as a standalone <code>.py</code> that references the
-  dataset, plus the rendered figure as PNG, SVG or PDF. The 3-D camera, the colors, the
-  ticks — all of it is in the code.
+- **Exports clean code.** The figure as a standalone <code>.py</code> that reads the dataset
+  next to it (portable, no absolute paths), plus the rendered figure as PNG, SVG or PDF at the
+  canvas dpi — the same file the script writes. The 3-D camera, the colors, the ticks — all of
+  it is in the code. Export headlessly from the shell, or as a one-folder reproducibility bundle.
+- **Never drops anything silently.** Unknown plot types, artists and keys, specs from a newer
+  version, overlapping tick labels and text off the canvas come back as warnings in the
+  render response, the CLI and the generated code.
+- **Keeps history.** Every save snapshots the previous version; list and restore them over
+  the API.
 - **Remembers your setup.** Themes, and the 3-D rotate/zoom direction, persist; figures,
   datasets and exports live in <code>~/.figfoundry</code>.
 
@@ -201,8 +209,11 @@ figfoundry            # start the web app (default)
 figfoundry serve      # ...with flags: --port, --host, --no-browser
 figfoundry list       # list saved figures
 figfoundry new        # create a blank figure, print its slug
-figfoundry export SLUG [--out PATH]        # write a figure's .py
-figfoundry render SLUG [--format png|svg|pdf] [--out PATH]
+figfoundry export SLUG|spec.json --pdf f.pdf --py f.py [--png f.png] [--svg f.svg]
+                                           # headless export, no server needed
+figfoundry export SLUG|spec.json --out-dir bundle/
+                                           # .py + .pdf + .png + .json + dataset copy
+figfoundry render SLUG|spec.json [--format png|svg|pdf] [--out PATH] [--dpi N]
 figfoundry datasets   # list available datasets
 ```
 
@@ -230,7 +241,7 @@ Python 3.10 or newer. It runs wherever Python and a browser do.
 
 ```sh
 uv sync --extra dev
-uv run --extra dev pytest -q          # 153 tests
+uv run --extra dev pytest -q          # 218 tests
 uv run --with ruff ruff check .       # lint
 uv run figfoundry serve               # the app
 ```
