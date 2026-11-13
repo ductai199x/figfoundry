@@ -17,6 +17,28 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 
 @pytest.fixture(autouse=True)
+def _isolated_user_dir(tmp_path, monkeypatch):
+    """Every test gets throwaway canvases/out/datasets dirs, so the suite never
+    writes into the real ~/.figfoundry (canvases, history snapshots, downloads).
+    Tests that need data on disk use the data_dir fixture, which re-points
+    DATA_DIR at a populated temp dir."""
+    import figfoundry.app as app_module
+    import figfoundry.canvas as canvas
+    import figfoundry.cli as cli
+    from figfoundry import data_io
+
+    root = tmp_path / "_ff_user"
+    for sub in ("canvases", "out", "datasets"):
+        (root / sub).mkdir(parents=True)
+    for mod in (app_module, cli):
+        monkeypatch.setattr(mod, "CANVAS_DIR", str(root / "canvases"))
+        monkeypatch.setattr(mod, "OUT_DIR", str(root / "out"))
+    monkeypatch.setattr(data_io, "DATA_DIR", str(root / "datasets"))
+    monkeypatch.setattr(data_io, "SAMPLE_NPZ", str(root / "datasets" / "sample.npz"))
+    monkeypatch.setattr(canvas, "DATA_DIR", str(root / "datasets"))
+
+
+@pytest.fixture(autouse=True)
 def _fresh_dataset_cache(monkeypatch):
     """``canvas._ds_cache`` is keyed by filename only, so an entry left by one
     test's tmp dir would serve that dir's arrays to the next test. Reset per test."""
